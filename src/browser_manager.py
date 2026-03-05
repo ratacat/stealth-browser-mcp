@@ -99,11 +99,49 @@ class BrowserManager:
         instance_id: str,
         proxy_config: Optional[ProxyConfig],
         install_request_paused_handler: bool = False,
+        enable_fetch: bool = True,
     ) -> None:
         if not proxy_config or not proxy_config.username:
             return
 
         if proxy_config.password is None:
+            return
+
+        existing_state = self._proxy_auth_handlers.get(instance_id)
+        if existing_state:
+            if install_request_paused_handler and not existing_state.get(
+                "request_paused_handler"
+            ):
+
+                async def on_request_paused(event):
+                    await tab.send(
+                        uc.cdp.fetch.continue_request(request_id=event.request_id)
+                    )
+
+                request_paused_handler: Callable = lambda event: asyncio.create_task(
+                    on_request_paused(event)
+                )
+                tab.add_handler(uc.cdp.fetch.RequestPaused, request_paused_handler)
+                existing_state["request_paused_handler"] = request_paused_handler
+
+            if enable_fetch and not existing_state.get("fetch_enabled"):
+                await tab.send(
+                    uc.cdp.fetch.enable(
+                        patterns=[
+                            uc.cdp.fetch.RequestPattern(
+                                url_pattern="*",
+                                request_stage=uc.cdp.fetch.RequestStage.REQUEST,
+                            ),
+                            uc.cdp.fetch.RequestPattern(
+                                url_pattern="*",
+                                request_stage=uc.cdp.fetch.RequestStage.RESPONSE,
+                            ),
+                        ],
+                        handle_auth_requests=True,
+                    )
+                )
+                existing_state["fetch_enabled"] = True
+
             return
 
         async def on_auth_required(event):
@@ -140,21 +178,22 @@ class BrowserManager:
                 on_request_paused(event)
             )
 
-        await tab.send(
-            uc.cdp.fetch.enable(
-                patterns=[
-                    uc.cdp.fetch.RequestPattern(
-                        url_pattern="*",
-                        request_stage=uc.cdp.fetch.RequestStage.REQUEST,
-                    ),
-                    uc.cdp.fetch.RequestPattern(
-                        url_pattern="*",
-                        request_stage=uc.cdp.fetch.RequestStage.RESPONSE,
-                    ),
-                ],
-                handle_auth_requests=True,
+        if enable_fetch:
+            await tab.send(
+                uc.cdp.fetch.enable(
+                    patterns=[
+                        uc.cdp.fetch.RequestPattern(
+                            url_pattern="*",
+                            request_stage=uc.cdp.fetch.RequestStage.REQUEST,
+                        ),
+                        uc.cdp.fetch.RequestPattern(
+                            url_pattern="*",
+                            request_stage=uc.cdp.fetch.RequestStage.RESPONSE,
+                        ),
+                    ],
+                    handle_auth_requests=True,
+                )
             )
-        )
         tab.add_handler(uc.cdp.fetch.AuthRequired, auth_required_handler)
         if request_paused_handler:
             tab.add_handler(uc.cdp.fetch.RequestPaused, request_paused_handler)
@@ -162,6 +201,7 @@ class BrowserManager:
             "tab": tab,
             "auth_required_handler": auth_required_handler,
             "request_paused_handler": request_paused_handler,
+            "fetch_enabled": enable_fetch,
         }
 
     async def _teardown_proxy_auth(self, instance_id: str) -> None:
@@ -184,6 +224,12 @@ class BrowserManager:
         if request_paused_handler:
             try:
                 tab.remove_handler(uc.cdp.fetch.RequestPaused, request_paused_handler)
+            except Exception:
+                pass
+
+        if handler_state.get("fetch_enabled"):
+            try:
+                await tab.send(uc.cdp.fetch.disable())
             except Exception:
                 pass
 
@@ -276,13 +322,33 @@ class BrowserManager:
             )
             print(f"[DEBUG] Set viewport to {options.viewport_width}x{options.viewport_height}", file=sys.stderr)
 
-            dynamic_hooks_ok = await self._setup_dynamic_hooks(tab, instance_id)
-            await self._setup_proxy_auth(
-                tab=tab,
-                instance_id=instance_id,
-                proxy_config=proxy_config,
-                install_request_paused_handler=not dynamic_hooks_ok,
+            needs_proxy_auth = bool(
+                proxy_config
+                and proxy_config.username
+                and proxy_config.password is not None
             )
+            if needs_proxy_auth:
+                await self._setup_proxy_auth(
+                    tab=tab,
+                    instance_id=instance_id,
+                    proxy_config=proxy_config,
+                    enable_fetch=False,
+                )
+
+            dynamic_hooks_ok = await self._setup_dynamic_hooks(
+                tab,
+                instance_id,
+                handle_auth_requests=needs_proxy_auth,
+            )
+
+            if needs_proxy_auth and not dynamic_hooks_ok:
+                await self._setup_proxy_auth(
+                    tab=tab,
+                    instance_id=instance_id,
+                    proxy_config=proxy_config,
+                    enable_fetch=True,
+                    install_request_paused_handler=True,
+                )
 
             spawn_diagnostics = self._build_spawn_diagnostics(
                 launch_args=launch_args,
@@ -316,16 +382,65 @@ class BrowserManager:
 
         except Exception as e:
             instance.state = BrowserState.ERROR
+
+            try:
+                await self._teardown_proxy_auth(instance_id)
+            except Exception:
+                pass
+
+            try:
+                if 'browser' in locals() and browser:
+                    try:
+                        if hasattr(browser, "tabs") and browser.tabs:
+                            for tab_to_close in browser.tabs[:]:
+                                try:
+                                    await tab_to_close.close()
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                    try:
+                        await browser.stop()
+                    except Exception:
+                        pass
+            finally:
+                try:
+                    process_cleanup.kill_browser_process(instance_id)
+                except Exception:
+                    pass
+
+            self._spawn_diagnostics.pop(instance_id, None)
+            try:
+                persistent_storage.remove_instance(instance_id)
+            except Exception:
+                pass
             raise Exception(f"Failed to spawn browser: {str(e)}")
 
         return instance
     
-    async def _setup_dynamic_hooks(self, tab: Tab, instance_id: str) -> bool:
+    async def _setup_dynamic_hooks(
+        self,
+        tab: Tab,
+        instance_id: str,
+        *,
+        handle_auth_requests: bool = False,
+    ) -> bool:
         """Setup dynamic hook system for browser instance."""
         try:
             dynamic_hook_system.add_instance(instance_id)
 
-            await dynamic_hook_system.setup_interception(tab, instance_id)
+            ok = await dynamic_hook_system.setup_interception(
+                tab,
+                instance_id,
+                handle_auth_requests=handle_auth_requests,
+            )
+            if not ok:
+                debug_logger.log_error(
+                    "browser_manager",
+                    "_setup_dynamic_hooks",
+                    f"Dynamic hook system interception failed for instance {instance_id}",
+                )
+                return False
 
             debug_logger.log_info(
                 "browser_manager",

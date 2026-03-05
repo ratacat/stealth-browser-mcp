@@ -164,7 +164,13 @@ class DynamicHookSystem:
         self.instance_hooks: Dict[str, List[str]] = {}  # instance_id -> list of hook_ids
         self._lock = asyncio.Lock()
     
-    async def setup_interception(self, tab, instance_id: str):
+    async def setup_interception(
+        self,
+        tab,
+        instance_id: str,
+        *,
+        handle_auth_requests: bool = False,
+    ) -> bool:
         """Set up request and response interception for a browser tab."""
         try:
             all_hooks = []
@@ -211,7 +217,12 @@ class DynamicHookSystem:
                     uc.cdp.fetch.RequestPattern(url_pattern='*', request_stage=uc.cdp.fetch.RequestStage.RESPONSE)
                 ]
             
-            await tab.send(uc.cdp.fetch.enable(patterns=all_patterns))
+            await tab.send(
+                uc.cdp.fetch.enable(
+                    patterns=all_patterns,
+                    handle_auth_requests=True if handle_auth_requests else None,
+                )
+            )
             
             tab.add_handler(
                 uc.cdp.fetch.RequestPaused,
@@ -219,9 +230,11 @@ class DynamicHookSystem:
             )
             
             debug_logger.log_info("dynamic_hook_system", "setup_interception", f"Set up interception for instance {instance_id} with {len(all_patterns)} patterns ({len(request_patterns)} request, {len(response_patterns)} response)")
+            return True
             
         except Exception as e:
             debug_logger.log_error("dynamic_hook_system", "setup_interception", f"Failed to setup interception: {e}")
+            return False
     
     async def _on_request_paused(self, tab, event, instance_id: str):
         """Handle intercepted requests and responses - process hooks immediately."""
