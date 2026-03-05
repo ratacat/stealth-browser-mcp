@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import List, Optional
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 
 class ProxyConfigError(ValueError):
@@ -58,8 +58,8 @@ def parse_proxy_config(proxy_url: str) -> ProxyConfig:
 
     return ProxyConfig(
         server=server,
-        username=parsed.username,
-        password=parsed.password,
+        username=unquote(parsed.username) if parsed.username else None,
+        password=unquote(parsed.password) if parsed.password is not None else None,
     )
 
 
@@ -69,9 +69,21 @@ def merge_proxy_server_arg(args: List[str], proxy_server: Optional[str]) -> List
     if not proxy_server:
         return args
     prefix = "--proxy-server="
-    filtered = [arg for arg in args if not arg.startswith(prefix)]
-    filtered.append(f"{prefix}{proxy_server}")
-    return filtered
+    merged: List[str] = []
+    idx = 0
+    while idx < len(args):
+        arg = args[idx]
+        if arg.startswith(prefix):
+            idx += 1
+            continue
+        if arg == "--proxy-server":
+            idx += 2
+            continue
+        merged.append(arg)
+        idx += 1
+
+    merged.append(f"{prefix}{proxy_server}")
+    return merged
 
 
 def redact_launch_arg(arg: str) -> str:
