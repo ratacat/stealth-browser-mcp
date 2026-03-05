@@ -46,8 +46,12 @@ def parse_proxy_config(proxy_url: str) -> ProxyConfig:
 
     host = _format_host(hostname)
     netloc = host
-    if parsed.port is not None:
-        netloc = f"{host}:{parsed.port}"
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ProxyConfigError(f"Invalid proxy URL (bad port): {raw}") from error
+    if port is not None:
+        netloc = f"{host}:{port}"
 
     scheme = parsed.scheme or "http"
     server = urlunsplit((scheme, netloc, "", "", ""))
