@@ -2258,7 +2258,7 @@ async def execute_cdp_command(
 
     Args:
         instance_id (str): Browser instance ID.
-        command (str): CDP command name (e.g., 'evaluate', 'callFunctionOn').
+        command (str): CDP Runtime command name (e.g., 'evaluate', 'callFunctionOn', or 'call_function_on').
         params (Dict[str, Any], optional): Command parameters as a dictionary.
                 IMPORTANT: Use snake_case parameter names (e.g., 'return_by_value') 
                 NOT camelCase ('returnByValue'). The nodriver library expects 

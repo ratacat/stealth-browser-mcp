@@ -21,6 +21,39 @@ from nodriver import Tab
 from debug_logger import debug_logger
 
 
+def _normalize_runtime_command(command: str) -> str:
+    """Normalize a CDP Runtime command name for nodriver.
+
+    Accepts either CDP-style camelCase (e.g. ``callFunctionOn``) or the nodriver
+    snake_case method name (e.g. ``call_function_on``). Also tolerates an
+    optional ``Runtime.`` prefix.
+    """
+    if not isinstance(command, str):
+        raise ValueError("CDP command must be a string")
+    trimmed = command.strip()
+    if not trimmed:
+        raise ValueError("CDP command is empty")
+
+    if "." in trimmed:
+        trimmed = trimmed.split(".")[-1]
+
+    if "_" in trimmed:
+        return trimmed.lower()
+
+    out: List[str] = []
+    prev_was_lower = False
+    for ch in trimmed:
+        if ch.isupper():
+            if out and prev_was_lower:
+                out.append("_")
+            out.append(ch.lower())
+            prev_was_lower = False
+        else:
+            out.append(ch)
+            prev_was_lower = ch.isalpha() and ch.islower()
+    return "".join(out)
+
+
 class ExecutionContext:
     """Represents a JavaScript execution context."""
 
@@ -132,11 +165,16 @@ class CDPFunctionExecutor:
         """
         try:
             await self.enable_runtime(tab)
-            cdp_method = getattr(uc.cdp.runtime, command, None)
+            normalized_command = _normalize_runtime_command(command)
+            cdp_method = getattr(uc.cdp.runtime, normalized_command, None)
             if not cdp_method:
                 raise ValueError(f"Unknown CDP command: {command}")
             result = await tab.send(cdp_method(**params))
-            debug_logger.log_info("cdp_function_executor", "execute_cdp_command", f"Executed {command} with params: {params}")
+            debug_logger.log_info(
+                "cdp_function_executor",
+                "execute_cdp_command",
+                f"Executed {command} ({normalized_command})",
+            )
             return {
                 "success": True,
                 "result": result,
