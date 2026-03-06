@@ -5,7 +5,7 @@ import os
 import sys
 import time
 import uuid
-from typing import Any, Callable, Dict, Optional, List
+from typing import Any, Callable, Dict, Optional, List, Tuple
 from datetime import datetime, timedelta
 
 import nodriver as uc
@@ -26,14 +26,28 @@ from proxy_utils import (
 )
 
 
+class BrowserStartupFailure(Exception):
+    """Raised when Chrome starts but nodriver fails to attach cleanly."""
+
+    def __init__(self, message: str, diagnostics: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
+
+
 class BrowserManager:
     """Manages multiple browser instances."""
+
+    _STARTUP_STDERR_MAX_CHARS = 4000
+    _STARTUP_STDERR_MAX_LINES = 40
+    _STARTUP_WAIT_TIMEOUT_SECONDS = 0.25
+    _STARTUP_COMMUNICATE_TIMEOUT_SECONDS = 0.5
 
     def __init__(self):
         self._instances: Dict[str, dict] = {}
         self._lock = asyncio.Lock()
         self._spawn_env_lock = asyncio.Lock()
         self._spawn_diagnostics: Dict[str, Dict[str, Any]] = {}
+        self._last_spawn_failure: Optional[Dict[str, Any]] = None
         self._proxy_auth_handlers: Dict[str, Dict[str, Any]] = {}
 
     @staticmethod
@@ -54,6 +68,8 @@ class BrowserManager:
         sandbox: bool,
         headless: bool,
         user_data_dir: Optional[str],
+        browser_executable: Optional[str] = None,
+        browser_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         return {
             "effective_browser_args": [redact_launch_arg(arg) for arg in launch_args],
@@ -62,7 +78,108 @@ class BrowserManager:
             "sandbox": sandbox,
             "headless": headless,
             "user_data_dir": user_data_dir,
+            "browser_executable": browser_executable,
+            "browser_type": browser_type,
         }
+
+    @classmethod
+    def _trim_stderr_text(cls, stderr_text: str) -> Tuple[str, bool]:
+        """Keep the tail of Chrome stderr so the most relevant startup error survives."""
+        trimmed = stderr_text.replace("\x00", "").strip()
+        truncated = False
+
+        lines = trimmed.splitlines()
+        if len(lines) > cls._STARTUP_STDERR_MAX_LINES:
+            lines = lines[-cls._STARTUP_STDERR_MAX_LINES :]
+            truncated = True
+
+        trimmed = "\n".join(lines)
+        if len(trimmed) > cls._STARTUP_STDERR_MAX_CHARS:
+            trimmed = "..." + trimmed[-(cls._STARTUP_STDERR_MAX_CHARS - 3) :]
+            truncated = True
+
+        return trimmed, truncated
+
+    async def _capture_browser_startup_diagnostics(
+        self, browser: Optional[Browser]
+    ) -> Dict[str, Any]:
+        """Collect subprocess state and stderr after a failed Chrome startup."""
+        process = getattr(browser, "_process", None)
+        if not process:
+            return {}
+
+        try:
+            await asyncio.wait_for(
+                process.wait(),
+                timeout=self._STARTUP_WAIT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            pass
+        except Exception:
+            pass
+
+        diagnostics: Dict[str, Any] = {
+            "browser_pid": getattr(process, "pid", None),
+            "browser_returncode": getattr(process, "returncode", None),
+            "browser_process_running": getattr(process, "returncode", None) is None,
+        }
+
+        raw_stderr = b""
+        if process.stderr is not None and process.returncode is not None:
+            try:
+                _, raw_stderr = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=self._STARTUP_COMMUNICATE_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                raw_stderr = b""
+
+        if not raw_stderr and process.stderr is not None:
+            buffer = getattr(process.stderr, "_buffer", None)
+            if buffer:
+                raw_stderr = bytes(buffer)
+
+        if raw_stderr:
+            stderr_text = raw_stderr.decode("utf-8", errors="replace")
+            stderr_text, truncated = self._trim_stderr_text(stderr_text)
+            if stderr_text:
+                diagnostics["browser_startup_stderr"] = stderr_text
+                diagnostics["browser_startup_stderr_truncated"] = truncated
+
+        return diagnostics
+
+    async def _start_browser_instance(self, config: uc.Config) -> Browser:
+        """Start nodriver while preserving access to Chrome stderr on attach failure."""
+        browser = Browser(config)
+        try:
+            await browser.start()
+            return browser
+        except Exception as error:
+            diagnostics = await self._capture_browser_startup_diagnostics(browser)
+            raise BrowserStartupFailure(
+                str(error),
+                diagnostics=diagnostics,
+            ) from error
+
+    @staticmethod
+    def _format_spawn_failure_message(
+        error_message: str, diagnostics: Dict[str, Any]
+    ) -> str:
+        lines = [error_message.strip()]
+
+        if diagnostics.get("browser_pid"):
+            pid_status = "running" if diagnostics.get("browser_process_running") else "exited"
+            lines.append(f"Chrome pid: {diagnostics['browser_pid']} ({pid_status})")
+
+        if diagnostics.get("browser_returncode") is not None:
+            lines.append(f"Chrome exit code: {diagnostics['browser_returncode']}")
+
+        stderr_tail = diagnostics.get("browser_startup_stderr")
+        if stderr_tail:
+            lines.append("Chrome stderr tail:")
+            lines.append(stderr_tail)
+
+        return "\n".join(lines)
 
     async def _start_browser_with_timezone(
         self,
@@ -71,11 +188,11 @@ class BrowserManager:
         timezone_id: Optional[str],
     ) -> Browser:
         if not timezone_id:
-            return await uc.start(config=config)
+            return await self._start_browser_instance(config)
 
         trimmed_timezone = timezone_id.strip()
         if not trimmed_timezone:
-            return await uc.start(config=config)
+            return await self._start_browser_instance(config)
 
         async with self._spawn_env_lock:
             previous_tz = os.environ.get("TZ")
@@ -83,7 +200,7 @@ class BrowserManager:
                 os.environ["TZ"] = trimmed_timezone
                 if hasattr(time, "tzset"):
                     time.tzset()
-                return await uc.start(config=config)
+                return await self._start_browser_instance(config)
             finally:
                 if previous_tz is None:
                     os.environ.pop("TZ", None)
@@ -251,6 +368,15 @@ class BrowserManager:
             user_agent=options.user_agent,
             viewport={"width": options.viewport_width, "height": options.viewport_height}
         )
+        spawn_diagnostics = self._build_spawn_diagnostics(
+            launch_args=[],
+            proxy_server=None,
+            timezone_id=options.timezone_id,
+            sandbox=options.sandbox,
+            headless=options.headless,
+            user_data_dir=options.user_data_dir,
+        )
+        spawn_phase = "initializing"
 
         try:
             platform_info = get_platform_info()
@@ -288,6 +414,16 @@ class BrowserManager:
                 proxy_config.server if proxy_config else None,
             )
             launch_args = merge_browser_args(caller_args)
+            spawn_diagnostics = self._build_spawn_diagnostics(
+                launch_args=launch_args,
+                proxy_server=proxy_config.server if proxy_config else None,
+                timezone_id=options.timezone_id,
+                sandbox=options.sandbox,
+                headless=options.headless,
+                user_data_dir=options.user_data_dir,
+                browser_executable=browser_executable,
+                browser_type=browser_type,
+            )
             
             config = uc.Config(
                 headless=options.headless,
@@ -297,6 +433,7 @@ class BrowserManager:
                 browser_args=launch_args
             )
 
+            spawn_phase = "starting_browser"
             browser = await self._start_browser_with_timezone(
                 config=config,
                 timezone_id=options.timezone_id,
@@ -309,6 +446,7 @@ class BrowserManager:
                 debug_logger.log_warning("browser_manager", "spawn_browser", 
                                        f"Browser {instance_id} has no process to track")
 
+            spawn_phase = "configuring_browser"
             if options.extra_headers:
                 await tab.send(uc.cdp.network.set_extra_http_headers(
                     headers=options.extra_headers
@@ -350,14 +488,6 @@ class BrowserManager:
                     install_request_paused_handler=True,
                 )
 
-            spawn_diagnostics = self._build_spawn_diagnostics(
-                launch_args=launch_args,
-                proxy_server=proxy_config.server if proxy_config else None,
-                timezone_id=options.timezone_id,
-                sandbox=options.sandbox,
-                headless=options.headless,
-                user_data_dir=options.user_data_dir,
-            )
             self._spawn_diagnostics[instance_id] = spawn_diagnostics
 
             async with self._lock:
@@ -382,6 +512,18 @@ class BrowserManager:
 
         except Exception as e:
             instance.state = BrowserState.ERROR
+            failure_diagnostics = dict(spawn_diagnostics)
+            failure_diagnostics.update(
+                {
+                    "instance_id": instance_id,
+                    "failure_stage": spawn_phase,
+                    "failed_at": datetime.now().isoformat(),
+                    "startup_error": str(e),
+                    "startup_error_type": type(e).__name__,
+                }
+            )
+            if isinstance(e, BrowserStartupFailure):
+                failure_diagnostics.update(e.diagnostics)
 
             try:
                 await self._teardown_proxy_auth(instance_id)
@@ -409,12 +551,21 @@ class BrowserManager:
                 except Exception:
                     pass
 
+            self._last_spawn_failure = failure_diagnostics
+            debug_logger.log_error(
+                "browser_manager",
+                "spawn_browser",
+                e,
+                context=failure_diagnostics,
+            )
             self._spawn_diagnostics.pop(instance_id, None)
             try:
                 persistent_storage.remove_instance(instance_id)
             except Exception:
                 pass
-            raise Exception(f"Failed to spawn browser: {str(e)}")
+            raise Exception(
+                self._format_spawn_failure_message(str(e), failure_diagnostics)
+            ) from e
 
         return instance
     
@@ -519,29 +670,19 @@ class BrowserManager:
                     pass
 
                 try:
-                    import asyncio
-                    if hasattr(browser, 'connection') and browser.connection:
-                        asyncio.get_event_loop().create_task(browser.connection.disconnect())
-                        debug_logger.log_info("browser_manager", "close_connection", "closed connection using get_event_loop().create_task()")
-                except RuntimeError:
-                    try:
-                        import asyncio
-                        if hasattr(browser, 'connection') and browser.connection:
-                            await asyncio.wait_for(browser.connection.disconnect(), timeout=2.0)
-                            debug_logger.log_info("browser_manager", "close_connection", "closed connection with direct await and timeout")
-                    except (asyncio.TimeoutError, Exception) as e:
-                        debug_logger.log_info("browser_manager", "close_connection", f"connection disconnect failed or timed out: {e}")
-                        pass
-                except Exception as e:
-                    debug_logger.log_info("browser_manager", "close_connection", f"connection disconnect failed: {e}")
-                    pass
-
-                try:
                     import nodriver.cdp.browser as cdp_browser
                     if hasattr(browser, 'connection') and browser.connection:
-                        await browser.connection.send(cdp_browser.close())
-                except Exception:
-                    pass
+                        await asyncio.wait_for(browser.connection.send(cdp_browser.close()), timeout=2.0)
+                        debug_logger.log_info("browser_manager", "close_connection", "requested browser close over connection")
+                except (asyncio.TimeoutError, Exception) as e:
+                    debug_logger.log_info("browser_manager", "close_connection", f"browser close request failed or timed out: {e}")
+
+                try:
+                    if hasattr(browser, 'connection') and browser.connection:
+                        await asyncio.wait_for(browser.connection.disconnect(), timeout=2.0)
+                        debug_logger.log_info("browser_manager", "close_connection", "closed connection with direct await and timeout")
+                except (asyncio.TimeoutError, Exception) as e:
+                    debug_logger.log_info("browser_manager", "close_connection", f"connection disconnect failed or timed out: {e}")
 
                 try:
                     process_cleanup.kill_browser_process(instance_id)
@@ -620,6 +761,10 @@ class BrowserManager:
     async def get_spawn_diagnostics(self, instance_id: str) -> Optional[Dict[str, Any]]:
         """Get spawn diagnostics for an instance."""
         return self._spawn_diagnostics.get(instance_id)
+
+    async def get_last_spawn_failure_diagnostics(self) -> Optional[Dict[str, Any]]:
+        """Get diagnostics for the most recent browser spawn failure."""
+        return self._last_spawn_failure
 
     async def get_tab(self, instance_id: str) -> Optional[Tab]:
         """
