@@ -207,7 +207,10 @@ async def spawn_browser(
             "spawn_diagnostics": spawn_diagnostics or {},
         }
     except Exception as e:
-        raise Exception(f"Failed to spawn browser: {str(e)}")
+        message = str(e)
+        if message.startswith("Failed to spawn browser:"):
+            raise Exception(message) from e
+        raise Exception(f"Failed to spawn browser: {message}") from e
 
 @section_tool("browser-management")
 async def list_instances() -> List[Dict[str, Any]]:
@@ -1191,6 +1194,17 @@ async def clear_debug_view() -> bool:
         return True
     except asyncio.TimeoutError:
         return False
+
+
+@section_tool("debugging")
+async def get_last_spawn_failure_diagnostics() -> Dict[str, Any]:
+    """
+    Get structured diagnostics for the most recent browser spawn failure.
+
+    Returns:
+        Dict[str, Any]: Launch diagnostics including Chrome stderr when available.
+    """
+    return await browser_manager.get_last_spawn_failure_diagnostics() or {}
 
 
 @section_tool("debugging")
