@@ -158,7 +158,7 @@ async def spawn_browser(
         viewport_height (int): Viewport height in pixels.
         proxy (Optional[str]): Proxy server URL.
         browser_args (List[str]): Additional browser launch args.
-        timezone_id (Optional[str]): IANA timezone ID for browser spawn TZ.
+        timezone_id (Optional[str]): IANA timezone ID applied via CDP timezone override.
         block_resources (List[str]): List of resource types to block (e.g., ['image', 'font', 'stylesheet']).
         extra_headers (Dict[str, str]): Additional HTTP headers.
         user_data_dir (Optional[str]): Path to user data directory for persistent sessions.

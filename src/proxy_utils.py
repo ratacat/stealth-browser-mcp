@@ -43,11 +43,20 @@ def parse_proxy_config(proxy_url: str) -> ProxyConfig:
     hostname = parsed.hostname
     if not hostname:
         raise ProxyConfigError(f"Invalid proxy URL (missing hostname): {raw}")
+    if parsed.port is None:
+        raise ProxyConfigError(f"Invalid proxy URL (missing port): {raw}")
+    if parsed.username is not None and parsed.password is None:
+        raise ProxyConfigError(
+            f"Invalid proxy URL (username requires password): {raw}"
+        )
+    if parsed.password is not None and parsed.username is None:
+        raise ProxyConfigError(
+            f"Invalid proxy URL (password requires username): {raw}"
+        )
 
     host = _format_host(hostname)
     netloc = host
-    if parsed.port is not None:
-        netloc = f"{host}:{parsed.port}"
+    netloc = f"{host}:{parsed.port}"
 
     scheme = parsed.scheme or "http"
     server = urlunsplit((scheme, netloc, "", "", ""))
