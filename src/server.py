@@ -1008,6 +1008,33 @@ async def get_cookies(
 
 
 @section_tool("cookies-storage")
+async def get_observed_cookies(
+    instance_id: str,
+    names: Optional[List[str]] = None,
+    domains: Optional[List[str]] = None
+) -> List[Dict[str, Any]]:
+    """
+    Get the current observed-cookie snapshot for a browser instance.
+
+    Args:
+        instance_id (str): Browser instance ID.
+        names (Optional[List[str]]): Optional cookie-name filter.
+        domains (Optional[List[str]]): Optional domain filter.
+
+    Returns:
+        List[Dict[str, Any]]: List of observed cookies.
+    """
+    instance = await browser_manager.get_instance(instance_id)
+    if not instance:
+        raise Exception(f"Instance not found: {instance_id}")
+    return await network_interceptor.get_observed_cookies(
+        instance_id,
+        names,
+        domains,
+    )
+
+
+@section_tool("cookies-storage")
 async def set_cookie(
     instance_id: str,
     name: str,
@@ -2833,7 +2860,7 @@ if __name__ == "__main__":
         print("  network-debugging: Network monitoring and interception (10 tools)")
         print("  cdp-functions: Chrome DevTools Protocol function execution (15 tools)")
         print("  progressive-cloning: Advanced element cloning system (10 tools)")
-        print("  cookies-storage: Cookie and storage management (3 tools)")
+        print("  cookies-storage: Cookie and storage management (4 tools)")
         print("  tabs: Tab management (5 tools)")
         print("  debugging: Debug and system tools (6 tools)")
         print("  dynamic-hooks: AI-powered network hook system (12 tools)")

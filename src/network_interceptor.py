@@ -3,10 +3,13 @@
 import asyncio
 import base64
 import json
+import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import nodriver as uc
 from nodriver import Tab
@@ -22,7 +25,306 @@ class NetworkInterceptor:
         self._responses: Dict[str, NetworkResponse] = {}
         self._instance_requests: Dict[str, List[str]] = {}
         self._instance_filters: Dict[str, Dict[str, List[str]]] = {}
+        self._observed_cookies: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self._lock = asyncio.Lock()
+        self._capture_response_bodies = (
+            os.getenv("STEALTH_CAPTURE_RESPONSE_BODIES", "").strip().lower()
+            in {"1", "true", "yes", "on", "enabled"}
+        )
+
+    @staticmethod
+    def _utc_now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _cookie_identity_key(cookie: Dict[str, Any]) -> Optional[str]:
+        name = str(cookie.get("name") or "").strip()
+        if not name:
+            return None
+        domain = str(cookie.get("domain") or "").strip().lower().lstrip(".")
+        path = str(cookie.get("path") or "/").strip() or "/"
+        return f"{name}\t{domain}\t{path}"
+
+    @staticmethod
+    def _header_value(headers: Optional[Dict[str, Any]], name: str) -> Optional[str]:
+        if not headers:
+            return None
+        lowered = name.lower()
+        values: List[str] = []
+        for key, value in headers.items():
+            if str(key).lower() != lowered:
+                continue
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                values.append(text)
+        return "\n".join(values) if values else None
+
+    @staticmethod
+    def _normalize_same_site(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        candidate = getattr(value, "value", value)
+        if candidate is None:
+            return None
+        text = str(candidate).strip()
+        return text or None
+
+    @staticmethod
+    def _normalize_expires_value(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            numeric = float(value)
+            return numeric if numeric > 0 else None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            numeric = float(text)
+            return numeric if numeric > 0 else None
+        except ValueError:
+            try:
+                parsed = parsedate_to_datetime(text)
+            except Exception:
+                return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+
+    @staticmethod
+    def _cookie_domain_from_url(url: Optional[str]) -> str:
+        if not url:
+            return ""
+        try:
+            parsed = urlparse(url)
+            return parsed.hostname or ""
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _cookie_secure_from_url(url: Optional[str]) -> bool:
+        if not url:
+            return False
+        try:
+            return urlparse(url).scheme.lower() == "https"
+        except Exception:
+            return False
+
+    @classmethod
+    def _build_cookie_from_cookie_object(
+        cls,
+        cookie: Any,
+        *,
+        source: str,
+        request_id: str,
+        url: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        name = str(getattr(cookie, "name", "") or "").strip()
+        value = str(getattr(cookie, "value", "") or "")
+        if not name:
+            return None
+        domain = str(getattr(cookie, "domain", "") or "").strip()
+        if not domain:
+            domain = cls._cookie_domain_from_url(url)
+        path = str(getattr(cookie, "path", "") or "/").strip() or "/"
+        return {
+            "name": name,
+            "value": value,
+            "domain": domain,
+            "path": path,
+            "secure": bool(getattr(cookie, "secure", False)),
+            "httpOnly": bool(getattr(cookie, "http_only", False)),
+            "sameSite": cls._normalize_same_site(getattr(cookie, "same_site", None)),
+            "expires": cls._normalize_expires_value(getattr(cookie, "expires", None)),
+            "source": source,
+            "requestId": request_id,
+            "url": url,
+            "observedAt": cls._utc_now_iso(),
+        }
+
+    @classmethod
+    def _build_cookie_from_request_header(
+        cls,
+        name: str,
+        value: str,
+        *,
+        source: str,
+        request_id: str,
+        url: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        cookie_name = (name or "").strip()
+        if not cookie_name:
+            return None
+        return {
+            "name": cookie_name,
+            "value": value,
+            "domain": cls._cookie_domain_from_url(url),
+            "path": "/",
+            "secure": cls._cookie_secure_from_url(url),
+            "httpOnly": None,
+            "sameSite": None,
+            "expires": None,
+            "source": source,
+            "requestId": request_id,
+            "url": url,
+            "observedAt": cls._utc_now_iso(),
+        }
+
+    @classmethod
+    def _parse_cookie_header(
+        cls,
+        header_value: Optional[str],
+        *,
+        source: str,
+        request_id: str,
+        url: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        if not header_value:
+            return []
+        cookies: List[Dict[str, Any]] = []
+        for segment in header_value.split(";"):
+            part = segment.strip()
+            if not part or "=" not in part:
+                continue
+            name, value = part.split("=", 1)
+            record = cls._build_cookie_from_request_header(
+                name,
+                value,
+                source=source,
+                request_id=request_id,
+                url=url,
+            )
+            if record:
+                cookies.append(record)
+        return cookies
+
+    @classmethod
+    def _parse_set_cookie_line(
+        cls,
+        cookie_line: str,
+        *,
+        source: str,
+        request_id: str,
+        url: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        line = (cookie_line or "").strip()
+        if not line or "=" not in line:
+            return None
+        parts = [segment.strip() for segment in line.split(";") if segment.strip()]
+        if not parts or "=" not in parts[0]:
+            return None
+
+        name, value = parts[0].split("=", 1)
+        record: Dict[str, Any] = {
+            "name": name.strip(),
+            "value": value,
+            "domain": cls._cookie_domain_from_url(url),
+            "path": "/",
+            "secure": False,
+            "httpOnly": False,
+            "sameSite": None,
+            "expires": None,
+            "source": source,
+            "requestId": request_id,
+            "url": url,
+            "observedAt": cls._utc_now_iso(),
+        }
+
+        max_age_seconds: Optional[int] = None
+        for attribute in parts[1:]:
+            if "=" in attribute:
+                key, attribute_value = attribute.split("=", 1)
+                key = key.strip().lower()
+                attribute_value = attribute_value.strip()
+            else:
+                key = attribute.strip().lower()
+                attribute_value = ""
+
+            if key == "domain" and attribute_value:
+                record["domain"] = attribute_value
+            elif key == "path" and attribute_value:
+                record["path"] = attribute_value
+            elif key == "secure":
+                record["secure"] = True
+            elif key == "httponly":
+                record["httpOnly"] = True
+            elif key == "samesite" and attribute_value:
+                record["sameSite"] = attribute_value
+            elif key == "expires" and attribute_value:
+                record["expires"] = cls._normalize_expires_value(attribute_value)
+            elif key == "max-age" and attribute_value:
+                try:
+                    max_age_seconds = int(attribute_value)
+                except ValueError:
+                    max_age_seconds = None
+
+        if max_age_seconds is not None:
+            record["expires"] = (
+                datetime.now(timezone.utc) + timedelta(seconds=max_age_seconds)
+            ).timestamp()
+
+        if not record["name"]:
+            return None
+        return record
+
+    @classmethod
+    def _parse_set_cookie_header(
+        cls,
+        header_value: Optional[str],
+        *,
+        source: str,
+        request_id: str,
+        url: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        if not header_value:
+            return []
+        cookies: List[Dict[str, Any]] = []
+        for line in header_value.split("\n"):
+            record = cls._parse_set_cookie_line(
+                line,
+                source=source,
+                request_id=request_id,
+                url=url,
+            )
+            if record:
+                cookies.append(record)
+        return cookies
+
+    @staticmethod
+    def _merge_cookie_records(
+        existing: Optional[Dict[str, Any]],
+        new_record: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not existing:
+            return dict(new_record)
+        merged = dict(existing)
+        for key, value in new_record.items():
+            if value is None:
+                continue
+            if isinstance(value, str) and not value:
+                continue
+            merged[key] = value
+        for key in ("source", "requestId", "url", "observedAt"):
+            if key in new_record:
+                merged[key] = new_record.get(key)
+        return merged
+
+    async def _observe_cookies(
+        self,
+        instance_id: str,
+        cookies: List[Dict[str, Any]],
+    ) -> None:
+        if not cookies:
+            return
+        async with self._lock:
+            store = self._observed_cookies.setdefault(instance_id, {})
+            for cookie in cookies:
+                key = self._cookie_identity_key(cookie)
+                if not key:
+                    continue
+                store[key] = self._merge_cookie_records(store.get(key), cookie)
 
     async def setup_interception(self, tab: Tab, instance_id: str, block_resources: List[str] = None):
         """
@@ -69,10 +371,26 @@ class NetworkInterceptor:
                 uc.cdp.network.ResponseReceived,
                 lambda event: asyncio.create_task(self._on_response(event, instance_id, tab)),
             )
+            if hasattr(uc.cdp.network, "RequestWillBeSentExtraInfo"):
+                tab.add_handler(
+                    uc.cdp.network.RequestWillBeSentExtraInfo,
+                    lambda event: asyncio.create_task(
+                        self._on_request_extra_info(event, instance_id)
+                    ),
+                )
+            if hasattr(uc.cdp.network, "ResponseReceivedExtraInfo"):
+                tab.add_handler(
+                    uc.cdp.network.ResponseReceivedExtraInfo,
+                    lambda event: asyncio.create_task(
+                        self._on_response_extra_info(event, instance_id)
+                    ),
+                )
             
             async with self._lock:
                 if instance_id not in self._instance_requests:
                     self._instance_requests[instance_id] = []
+                if instance_id not in self._observed_cookies:
+                    self._observed_cookies[instance_id] = {}
         except Exception as e:
             print(f"[DEBUG] Error in setup_interception: {e}", file=sys.stderr)
             raise Exception(f"Failed to setup network interception: {str(e)}")
@@ -120,6 +438,55 @@ class NetworkInterceptor:
             async with self._lock:
                 self._requests[request_id] = network_request
                 self._instance_requests[instance_id].append(request_id)
+
+            request_header_cookies = self._parse_cookie_header(
+                self._header_value(network_request.headers, "Cookie"),
+                source="request_header",
+                request_id=request_id,
+                url=network_request.url,
+            )
+            if request_header_cookies:
+                await self._observe_cookies(instance_id, request_header_cookies)
+        except Exception:
+            pass
+
+    async def _on_request_extra_info(self, event, instance_id: str):
+        """Handle request extra-info events and seed observed cookies."""
+        try:
+            request_id = str(event.request_id)
+            async with self._lock:
+                request = self._requests.get(request_id)
+            url = request.url if request else None
+
+            cookies: List[Dict[str, Any]] = []
+            for associated_cookie in getattr(event, "associated_cookies", []) or []:
+                blocked_reasons = getattr(associated_cookie, "blocked_reasons", []) or []
+                if blocked_reasons:
+                    continue
+                cookie = getattr(associated_cookie, "cookie", None)
+                record = self._build_cookie_from_cookie_object(
+                    cookie,
+                    source="request_associated_cookie",
+                    request_id=request_id,
+                    url=url,
+                ) if cookie else None
+                if record:
+                    cookies.append(record)
+
+            observed_names = {cookie["name"] for cookie in cookies if cookie.get("name")}
+            header_cookies = self._parse_cookie_header(
+                self._header_value(getattr(event, "headers", None), "Cookie"),
+                source="request_header_extra_info",
+                request_id=request_id,
+                url=url,
+            )
+            for record in header_cookies:
+                if record.get("name") in observed_names:
+                    continue
+                cookies.append(record)
+
+            if cookies:
+                await self._observe_cookies(instance_id, cookies)
         except Exception:
             pass
 
@@ -136,7 +503,7 @@ class NetworkInterceptor:
             response = event.response
 
             body = None
-            if tab:
+            if tab and self._capture_response_bodies:
                 try:
                     result = await tab.send(uc.cdp.network.get_response_body(request_id=request_id))
                     if result:
@@ -157,6 +524,37 @@ class NetworkInterceptor:
             )
             async with self._lock:
                 self._responses[request_id] = network_response
+
+            async with self._lock:
+                request = self._requests.get(request_id)
+            url = request.url if request else None
+            response_cookies = self._parse_set_cookie_header(
+                self._header_value(network_response.headers, "Set-Cookie"),
+                source="response_header",
+                request_id=request_id,
+                url=url,
+            )
+            if response_cookies:
+                await self._observe_cookies(instance_id, response_cookies)
+        except Exception:
+            pass
+
+    async def _on_response_extra_info(self, event, instance_id: str):
+        """Handle response extra-info events and update observed cookies."""
+        try:
+            request_id = str(event.request_id)
+            async with self._lock:
+                request = self._requests.get(request_id)
+            url = request.url if request else None
+
+            cookies = self._parse_set_cookie_header(
+                self._header_value(getattr(event, "headers", None), "Set-Cookie"),
+                source="response_header_extra_info",
+                request_id=request_id,
+                url=url,
+            )
+            if cookies:
+                await self._observe_cookies(instance_id, cookies)
         except Exception:
             pass
 
@@ -478,7 +876,7 @@ class NetworkInterceptor:
         try:
             if url:
                 # For specific URL, get all cookies for that URL and delete them
-                cookies = await tab.send(uc.cdp.network.get_cookies(urls=[url]))
+                cookies = await tab.send(uc.cdp.storage.get_cookies())
                 for cookie in cookies:
                     await tab.send(
                         uc.cdp.network.delete_cookies(
@@ -516,18 +914,99 @@ class NetworkInterceptor:
         Returns: List[Dict[str, Any]] - List of cookies.
         """
         try:
-            if urls:
-                result = await tab.send(uc.cdp.network.get_cookies(urls=urls))
+            # Use Storage.getCookies (non-blocking) instead of the deprecated
+            # Network.getCookies which hangs waiting for network idle during
+            # active page navigations (e.g. post-login redirects on X.com).
+            result = await tab.send(uc.cdp.storage.get_cookies())
+            if isinstance(result, list):
+                cookies = result
+            elif isinstance(result, dict):
+                cookies = result.get("cookies", [])
             else:
-                result = await tab.send(uc.cdp.network.get_all_cookies())
-            if isinstance(result, dict):
-                return result.get("cookies", [])
-            elif isinstance(result, list):
-                return result
-            else:
-                return []
+                cookies = []
+            # Storage.getCookies returns all cookies; filter by URL domain if requested
+            if urls and cookies:
+                from urllib.parse import urlparse
+                allowed_domains = set()
+                for url in urls:
+                    parsed = urlparse(url)
+                    if parsed.hostname:
+                        allowed_domains.add(parsed.hostname)
+                        # Also allow parent domain (e.g. .x.com for x.com)
+                        parts = parsed.hostname.split(".")
+                        if len(parts) >= 2:
+                            allowed_domains.add("." + ".".join(parts[-2:]))
+                def matches_domain(cookie) -> bool:
+                    domain = ""
+                    if hasattr(cookie, "domain"):
+                        domain = cookie.domain or ""
+                    elif isinstance(cookie, dict):
+                        domain = cookie.get("domain", "")
+                    domain = domain.lstrip(".")
+                    for allowed in allowed_domains:
+                        allowed_clean = allowed.lstrip(".")
+                        if domain == allowed_clean or domain.endswith("." + allowed_clean):
+                            return True
+                    return False
+                cookies = [c for c in cookies if matches_domain(c)]
+            return cookies
         except Exception as e:
             raise Exception(f"Failed to get cookies: {str(e)}")
+
+    async def get_observed_cookies(
+        self,
+        instance_id: str,
+        names: Optional[List[str]] = None,
+        domains: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get the current in-memory observed-cookie snapshot for an instance.
+
+        instance_id: str - The browser instance identifier.
+        names: Optional[List[str]] - Restrict results to these cookie names.
+        domains: Optional[List[str]] - Restrict results to these domains.
+        Returns: List[Dict[str, Any]] - List of observed cookies.
+        """
+        normalized_names = {
+            str(name).strip()
+            for name in (names or [])
+            if str(name).strip()
+        }
+        normalized_domains = {
+            str(domain).strip().lower().lstrip(".")
+            for domain in (domains or [])
+            if str(domain).strip()
+        }
+
+        async with self._lock:
+            cookies = [
+                dict(cookie)
+                for cookie in self._observed_cookies.get(instance_id, {}).values()
+            ]
+
+        if normalized_names:
+            cookies = [
+                cookie for cookie in cookies if str(cookie.get("name") or "") in normalized_names
+            ]
+
+        if normalized_domains:
+            def matches_domain(cookie: Dict[str, Any]) -> bool:
+                domain = str(cookie.get("domain") or "").lower().lstrip(".")
+                for allowed in normalized_domains:
+                    if domain == allowed or domain.endswith("." + allowed):
+                        return True
+                return False
+
+            cookies = [cookie for cookie in cookies if matches_domain(cookie)]
+
+        cookies.sort(
+            key=lambda cookie: (
+                str(cookie.get("name") or ""),
+                str(cookie.get("domain") or ""),
+                str(cookie.get("path") or "/"),
+            )
+        )
+        return cookies
 
     async def emulate_network_conditions(
         self,
@@ -572,3 +1051,4 @@ class NetworkInterceptor:
                     self._requests.pop(req_id, None)
                     self._responses.pop(req_id, None)
                 del self._instance_requests[instance_id]
+            self._observed_cookies.pop(instance_id, None)
