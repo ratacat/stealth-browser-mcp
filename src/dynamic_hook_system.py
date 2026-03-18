@@ -210,20 +210,46 @@ class DynamicHookSystem:
                     request_patterns.append(pattern)
             
             all_patterns = request_patterns + response_patterns
-            
+
             if not all_patterns:
+                if not handle_auth_requests:
+                    # No hooks and no proxy auth — skip Fetch interception entirely.
+                    debug_logger.log_info("dynamic_hook_system", "setup_interception", f"No hooks for instance {instance_id} — skipping Fetch interception entirely")
+                    return True
+                # No hooks but proxy auth needed — enable Fetch with wildcard
+                # patterns (required for Chrome to fire AuthRequired on 407) but
+                # use a lightweight pass-through handler that immediately continues
+                # each paused request. This avoids the CDP throughput collapse that
+                # occurs when the full hook-processing pipeline handles every
+                # request during heavy page loads.
                 all_patterns = [
                     uc.cdp.fetch.RequestPattern(url_pattern='*', request_stage=uc.cdp.fetch.RequestStage.REQUEST),
-                    uc.cdp.fetch.RequestPattern(url_pattern='*', request_stage=uc.cdp.fetch.RequestStage.RESPONSE)
                 ]
-            
+                await tab.send(
+                    uc.cdp.fetch.enable(
+                        patterns=all_patterns,
+                        handle_auth_requests=True,
+                    )
+                )
+                async def _passthrough_request_paused(event):
+                    try:
+                        await tab.send(uc.cdp.fetch.continue_request(request_id=event.request_id))
+                    except Exception:
+                        pass
+                tab.add_handler(
+                    uc.cdp.fetch.RequestPaused,
+                    lambda event: asyncio.create_task(_passthrough_request_paused(event))
+                )
+                debug_logger.log_info("dynamic_hook_system", "setup_interception", f"No hooks for instance {instance_id} — enabled Fetch for proxy auth with lightweight pass-through (request stage only)")
+                return True
+
             await tab.send(
                 uc.cdp.fetch.enable(
                     patterns=all_patterns,
                     handle_auth_requests=True if handle_auth_requests else None,
                 )
             )
-            
+
             tab.add_handler(
                 uc.cdp.fetch.RequestPaused,
                 lambda event: asyncio.create_task(self._on_request_paused(tab, event, instance_id))

@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 
 import nodriver as uc
 from nodriver import Browser, Tab
+from nodriver.core._contradict import ContraDict
+from nodriver.core.connection import Connection
 
 from debug_logger import debug_logger
 from models import BrowserInstance, BrowserState, BrowserOptions, PageState
@@ -41,6 +43,8 @@ class BrowserManager:
     _STARTUP_STDERR_MAX_LINES = 40
     _STARTUP_WAIT_TIMEOUT_SECONDS = 0.25
     _STARTUP_COMMUNICATE_TIMEOUT_SECONDS = 0.5
+    _STARTUP_ATTACH_RECOVERY_TIMEOUT_SECONDS = 6.0
+    _STARTUP_ATTACH_RECOVERY_INTERVAL_SECONDS = 0.5
 
     def __init__(self):
         self._instances: Dict[str, dict] = {}
@@ -104,9 +108,10 @@ class BrowserManager:
         self, browser: Optional[Browser]
     ) -> Dict[str, Any]:
         """Collect subprocess state and stderr after a failed Chrome startup."""
+        recovery = getattr(browser, "_xpool_attach_recovery", None)
         process = getattr(browser, "_process", None)
         if not process:
-            return {}
+            return dict(recovery) if isinstance(recovery, dict) else {}
 
         try:
             await asyncio.wait_for(
@@ -146,7 +151,99 @@ class BrowserManager:
                 diagnostics["browser_startup_stderr"] = stderr_text
                 diagnostics["browser_startup_stderr_truncated"] = truncated
 
+        if isinstance(recovery, dict):
+            diagnostics.update(recovery)
+
         return diagnostics
+
+    async def _finish_browser_attach(self, browser: Browser) -> Browser:
+        browser.targets.clear()
+        browser.connection = Connection(
+            browser.info.webSocketDebuggerUrl,
+            browser=browser,
+        )
+
+        if browser.config.autodiscover_targets:
+            browser.connection.handlers[uc.cdp.target.TargetInfoChanged] = [
+                browser._handle_target_update
+            ]
+            browser.connection.handlers[uc.cdp.target.TargetCreated] = [
+                browser._handle_target_update
+            ]
+            browser.connection.handlers[uc.cdp.target.TargetDestroyed] = [
+                browser._handle_target_update
+            ]
+            browser.connection.handlers[uc.cdp.target.TargetCrashed] = [
+                browser._handle_target_update
+            ]
+            await browser.connection.send(
+                uc.cdp.target.set_discover_targets(discover=True)
+            )
+
+        await browser.update_targets()
+        if not any(getattr(target, "type_", None) == "page" for target in browser.targets):
+            raise RuntimeError("browser targets not ready")
+        return browser
+
+    async def _recover_browser_attach(self, browser: Browser) -> bool:
+        process = getattr(browser, "_process", None)
+        http = getattr(browser, "_http", None)
+        if not process or getattr(process, "returncode", None) is not None or http is None:
+            return False
+
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        deadline = started_at + self._STARTUP_ATTACH_RECOVERY_TIMEOUT_SECONDS
+        attempts = 0
+        last_error = ""
+
+        while loop.time() < deadline:
+            attempts += 1
+            try:
+                version = await http.get("version")
+                browser.info = ContraDict(version, silent=True)
+                await self._finish_browser_attach(browser)
+                browser._xpool_attach_recovery = {
+                    "startup_attach_recovery_attempted": True,
+                    "startup_attach_recovery_succeeded": True,
+                    "startup_attach_recovery_attempts": attempts,
+                    "startup_attach_recovery_elapsed_ms": int(
+                        (loop.time() - started_at) * 1000
+                    ),
+                }
+                debug_logger.log_warning(
+                    "browser_manager",
+                    "spawn_browser",
+                    "Recovered browser attach after initial nodriver timeout",
+                    context=browser._xpool_attach_recovery,
+                )
+                return True
+            except Exception as error:
+                last_error = str(error)
+                browser._xpool_attach_recovery = {
+                    "startup_attach_recovery_attempted": True,
+                    "startup_attach_recovery_succeeded": False,
+                    "startup_attach_recovery_attempts": attempts,
+                    "startup_attach_recovery_elapsed_ms": int(
+                        (loop.time() - started_at) * 1000
+                    ),
+                    "startup_attach_recovery_last_error": last_error,
+                }
+                try:
+                    if getattr(browser, "connection", None):
+                        await browser.connection.disconnect()
+                except Exception:
+                    pass
+                browser.connection = None
+                await asyncio.sleep(self._STARTUP_ATTACH_RECOVERY_INTERVAL_SECONDS)
+
+        debug_logger.log_warning(
+            "browser_manager",
+            "spawn_browser",
+            "Extended browser attach recovery window expired",
+            context=getattr(browser, "_xpool_attach_recovery", {}),
+        )
+        return False
 
     async def _start_browser_instance(self, config: uc.Config) -> Browser:
         """Start nodriver while preserving access to Chrome stderr on attach failure."""
@@ -155,6 +252,8 @@ class BrowserManager:
             await browser.start()
             return browser
         except Exception as error:
+            if await self._recover_browser_attach(browser):
+                return browser
             diagnostics = await self._capture_browser_startup_diagnostics(browser)
             raise BrowserStartupFailure(
                 str(error),
