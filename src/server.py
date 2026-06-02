@@ -478,6 +478,36 @@ async def type_text(
     return await dom_handler.type_text(tab, selector, text, clear_first, delay_ms, parse_newlines, shift_enter)
 
 @section_tool("element-interaction")
+async def press_key(
+    instance_id: str,
+    key: str,
+    selector: Optional[str] = None,
+    delay_ms: int = 50,
+    modifiers: int = 0
+) -> bool:
+    """
+    Press a keyboard key using native browser input events.
+
+    Args:
+        instance_id (str): Browser instance ID.
+        key (str): Key name to press, e.g. Enter.
+        selector (Optional[str]): CSS selector to focus before pressing.
+        delay_ms (int): Delay between key down and key up in milliseconds.
+        modifiers (int): Chrome DevTools modifier bit field.
+
+    Returns:
+        bool: True if key press succeeded.
+    """
+    if isinstance(delay_ms, str):
+        delay_ms = int(delay_ms)
+    if isinstance(modifiers, str):
+        modifiers = int(modifiers)
+    tab = await browser_manager.get_tab(instance_id)
+    if not tab:
+        raise Exception(f"Instance not found: {instance_id}")
+    return await dom_handler.press_key(tab, key, selector, delay_ms, modifiers)
+
+@section_tool("element-interaction")
 async def paste_text(
     instance_id: str,
     selector: str,

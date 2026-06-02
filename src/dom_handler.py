@@ -186,9 +186,56 @@ class DOMHandler:
             await asyncio.sleep(0.5)
 
             try:
-                await element.click()
+                from nodriver import cdp
+
+                click_point = await element.apply(
+                    """(elem) => {
+                        const rect = elem.getBoundingClientRect();
+                        if (!rect || rect.width < 1 || rect.height < 1) {
+                            return null;
+                        }
+                        const x = rect.left + rect.width / 2;
+                        const y = rect.top + rect.height / 2;
+                        const top = document.elementFromPoint(x, y);
+                        const hit = top === elem || elem.contains(top);
+                        return { x, y, width: rect.width, height: rect.height, hit };
+                    }"""
+                )
+                if not click_point:
+                    raise Exception("Element click point not available")
+                if isinstance(click_point, str):
+                    click_point = json.loads(click_point)
+                if not click_point.get("hit", False):
+                    raise Exception("Element center is covered")
+                x = float(click_point["x"])
+                y = float(click_point["y"])
+                await tab.send(cdp.input_.dispatch_mouse_event(
+                    "mouseMoved",
+                    x=x,
+                    y=y,
+                    button=cdp.input_.MouseButton("none"),
+                    buttons=0,
+                ))
+                await asyncio.sleep(0.08)
+                await tab.send(cdp.input_.dispatch_mouse_event(
+                    "mousePressed",
+                    x=x,
+                    y=y,
+                    button=cdp.input_.MouseButton("left"),
+                    buttons=1,
+                    click_count=1,
+                ))
+                await asyncio.sleep(0.06)
+                await tab.send(cdp.input_.dispatch_mouse_event(
+                    "mouseReleased",
+                    x=x,
+                    y=y,
+                    button=cdp.input_.MouseButton("left"),
+                    buttons=0,
+                    click_count=1,
+                ))
             except Exception:
-                await element.mouse_click()
+                await element.click()
 
             return True
 
@@ -220,6 +267,8 @@ class DOMHandler:
         Returns:
             bool: True if typing succeeded, False otherwise.
         """
+        from nodriver import cdp
+
         try:
             element = await tab.select(selector)
             if not element:
@@ -241,7 +290,7 @@ class DOMHandler:
                 lines = text.split('\n')
                 for i, line in enumerate(lines):
                     for char in line:
-                        await element.send_keys(char)
+                        await tab.send(cdp.input_.dispatch_key_event("char", text=char))
                         await asyncio.sleep(delay_ms / 1000)
                     
                     if i < len(lines) - 1:
@@ -279,13 +328,73 @@ class DOMHandler:
                         await asyncio.sleep(delay_ms / 1000)
             else:
                 for char in text:
-                    await element.send_keys(char)
+                    await tab.send(cdp.input_.dispatch_key_event("char", text=char))
                     await asyncio.sleep(delay_ms / 1000)
 
             return True
 
         except Exception as e:
             raise Exception(f"Failed to type text: {str(e)}")
+
+    @staticmethod
+    async def press_key(
+        tab: Tab,
+        key: str,
+        selector: Optional[str] = None,
+        delay_ms: int = 50,
+        modifiers: int = 0
+    ) -> bool:
+        """
+        Press a keyboard key using Chrome DevTools input events.
+
+        Args:
+            tab (Tab): The browser tab object.
+            key (str): Key name to press.
+            selector (Optional[str]): CSS selector to focus before pressing.
+            delay_ms (int): Delay between key down and key up in milliseconds.
+            modifiers (int): CDP modifier bit field.
+
+        Returns:
+            bool: True if the key press succeeded, False otherwise.
+        """
+        from nodriver import cdp
+
+        key_map = {
+            "Enter": ("Enter", "Enter", 13),
+            "Tab": ("Tab", "Tab", 9),
+            "Escape": ("Escape", "Escape", 27),
+            "Backspace": ("Backspace", "Backspace", 8),
+            "Delete": ("Delete", "Delete", 46),
+        }
+
+        try:
+            if selector:
+                element = await tab.select(selector)
+                if not element:
+                    raise Exception(f"Element not found: {selector}")
+                await element.focus()
+                await asyncio.sleep(0.08)
+
+            key_name, code, virtual_key_code = key_map.get(key, (key, key, 0))
+            await tab.send(cdp.input_.dispatch_key_event(
+                "rawKeyDown",
+                modifiers=modifiers,
+                key=key_name,
+                code=code,
+                windows_virtual_key_code=virtual_key_code,
+            ))
+            await asyncio.sleep(delay_ms / 1000)
+            await tab.send(cdp.input_.dispatch_key_event(
+                "keyUp",
+                modifiers=modifiers,
+                key=key_name,
+                code=code,
+                windows_virtual_key_code=virtual_key_code,
+            ))
+            return True
+
+        except Exception as e:
+            raise Exception(f"Failed to press key: {str(e)}")
 
     @staticmethod
     async def paste_text(
