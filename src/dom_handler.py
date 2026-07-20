@@ -685,6 +685,84 @@ class DOMHandler:
         return False
 
     @staticmethod
+    def _plain_from_deep_serialized(value: Any) -> Any:
+        """Normalize CDP deep-serialized values (and RemoteObjects) to plain JSON.
+
+        nodriver's evaluate() returns deep-serialized shapes for objects
+        (entry lists of [key, {type, value}]) and RemoteObjects for falsy
+        primitives. Chrome's returnByValue path already yields plain JSON, so
+        this runs as a safe normalization over whatever came back.
+        """
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        # nodriver RemoteObject: prefer plain .value, then deep payload.
+        if hasattr(value, "deep_serialized_value") or hasattr(value, "object_id"):
+            plain = getattr(value, "value", None)
+            if plain is not None:
+                return DOMHandler._plain_from_deep_serialized(plain)
+            deep = getattr(value, "deep_serialized_value", None)
+            if deep is not None:
+                return DOMHandler._plain_from_deep_serialized(
+                    getattr(deep, "value", None)
+                )
+            return None
+        if isinstance(value, dict):
+            # A single deep-serialized node: {"type": <cdp-type>, "value": ...}
+            node_type = value.get("type")
+            if (
+                isinstance(node_type, str)
+                and node_type
+                in {
+                    "string", "number", "boolean", "bigint", "object",
+                    "array", "null", "undefined", "regexp", "date",
+                    "map", "set", "error",
+                }
+                and ("value" in value or node_type in ("null", "undefined"))
+                and len(value) <= 4
+            ):
+                if node_type in ("null", "undefined"):
+                    return None
+                inner = value.get("value")
+                if node_type == "object" and isinstance(inner, list):
+                    return DOMHandler._entries_to_plain(inner)
+                if node_type == "array" and isinstance(inner, list):
+                    return [
+                        DOMHandler._plain_from_deep_serialized(item)
+                        for item in inner
+                    ]
+                return DOMHandler._plain_from_deep_serialized(inner)
+            return {
+                key: DOMHandler._plain_from_deep_serialized(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            # Entry-list shape for a deep-serialized object: [[key, node], ...]
+            if value and all(
+                isinstance(entry, (list, tuple))
+                and len(entry) == 2
+                and isinstance(entry[0], str)
+                and isinstance(entry[1], dict)
+                and "type" in entry[1]
+                for entry in value
+            ):
+                return DOMHandler._entries_to_plain(value)
+            return [DOMHandler._plain_from_deep_serialized(item) for item in value]
+        return value
+
+    @staticmethod
+    def _entries_to_plain(entries: List[Any]) -> Any:
+        result: Dict[str, Any] = {}
+        all_numeric = len(entries) > 0
+        for entry in entries:
+            key, node = entry
+            if not key.isdigit():
+                all_numeric = False
+            result[key] = DOMHandler._plain_from_deep_serialized(node)
+        if all_numeric:
+            return [result[str(i)] for i in range(len(result))]
+        return result
+
+    @staticmethod
     async def execute_script(
         tab: Tab,
         script: str,
@@ -699,16 +777,19 @@ class DOMHandler:
             args (Optional[List[Any]]): Arguments for the script.
 
         Returns:
-            Any: Result of script execution.
+            Any: Result of script execution, normalized to plain JSON.
         """
         try:
             if args:
                 serialized_args = ",".join(json.dumps(a) for a in args)
-                result = await tab.evaluate(f'(function() {{ {script} }})({serialized_args})')
+                result = await tab.evaluate(
+                    f'(function() {{ {script} }})({serialized_args})',
+                    return_by_value=True,
+                )
             else:
-                result = await tab.evaluate(script)
+                result = await tab.evaluate(script, return_by_value=True)
 
-            return result
+            return DOMHandler._plain_from_deep_serialized(result)
 
         except Exception as e:
             raise Exception(f"Failed to execute script: {str(e)}")
