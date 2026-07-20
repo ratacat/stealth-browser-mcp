@@ -150,6 +150,36 @@ class ServerClickToolTests(unittest.IsolatedAsyncioTestCase):
             offset_x=30,
             offset_y=35,
             humanize=True,
+            warmup=False,
+        )
+
+    async def test_click_tool_threads_warmup_to_dom_handler(self):
+        tab = object()
+        get_tab = AsyncMock(return_value=tab)
+        click = AsyncMock(return_value=True)
+
+        with (
+            patch.object(server.browser_manager, "get_tab", get_tab),
+            patch.object(server.dom_handler, "click_element", click),
+        ):
+            clicked = await server.click_element.fn(
+                "browser-1",
+                "iframe",
+                timeout=2000,
+                humanize=True,
+                warmup=True,
+            )
+
+        self.assertTrue(clicked)
+        click.assert_awaited_once_with(
+            tab,
+            "iframe",
+            None,
+            2000,
+            offset_x=None,
+            offset_y=None,
+            humanize=True,
+            warmup=True,
         )
 
 

@@ -470,7 +470,8 @@ async def click_element(
     timeout: int = 10000,
     offset_x: Optional[float] = None,
     offset_y: Optional[float] = None,
-    humanize: bool = False
+    humanize: bool = False,
+    warmup: bool = False
 ) -> bool:
     """
     Click an element.
@@ -483,6 +484,9 @@ async def click_element(
         offset_x (Optional[float]): Horizontal click offset from the element's left edge.
         offset_y (Optional[float]): Vertical click offset from the element's top edge.
         humanize (bool): Use paced pointer movement before clicking.
+        warmup (bool): Emit wandering pointer moves across the viewport before
+            the approach, so behavioral monitors observe a movement history.
+            Implies humanize.
 
     Returns:
         bool: True if clicked successfully.
@@ -500,6 +504,7 @@ async def click_element(
         offset_x=offset_x,
         offset_y=offset_y,
         humanize=humanize,
+        warmup=warmup,
     )
 
 @section_tool("element-interaction")

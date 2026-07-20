@@ -162,7 +162,8 @@ class DOMHandler:
         timeout: int = 10000,
         offset_x: Optional[float] = None,
         offset_y: Optional[float] = None,
-        humanize: bool = False
+        humanize: bool = False,
+        warmup: bool = False
     ) -> bool:
         """
         Click an element with smart retry logic.
@@ -175,6 +176,10 @@ class DOMHandler:
             offset_x (Optional[float]): Horizontal click offset from the element's left edge.
             offset_y (Optional[float]): Vertical click offset from the element's top edge.
             humanize (bool): Move the pointer along a paced curved path before clicking.
+            warmup (bool): Emit a few wandering pointer moves across the viewport
+                before the approach path, so behavioral monitors (e.g. Cloudflare
+                Turnstile) observe a movement history instead of a click from
+                nowhere. Implies humanize.
 
         Returns:
             bool: True if click succeeded, False otherwise.
@@ -219,7 +224,8 @@ class DOMHandler:
                         const y = rect.top + clampOffset(offsetY, rect.height);
                         const top = document.elementFromPoint(x, y);
                         const hit = top === elem || elem.contains(top);
-                        return { x, y, width: rect.width, height: rect.height, hit };
+                        return { x, y, width: rect.width, height: rect.height, hit,
+                                 vw: window.innerWidth, vh: window.innerHeight };
                     }""" % (json.dumps(offset_x_value), json.dumps(offset_y_value))
                 )
                 if not click_point:
@@ -230,6 +236,23 @@ class DOMHandler:
                     raise Exception("Element click point is covered")
                 x = float(click_point["x"])
                 y = float(click_point["y"])
+
+                if warmup:
+                    humanize = True
+                    vw = float(click_point.get("vw") or 1280)
+                    vh = float(click_point.get("vh") or 720)
+                    wander_count = random.randint(3, 6)
+                    for _ in range(wander_count):
+                        wander_x = min(max(random.uniform(0.15, 0.85) * vw, 0), vw - 1)
+                        wander_y = min(max(random.uniform(0.15, 0.8) * vh, 0), vh - 1)
+                        await tab.send(cdp.input_.dispatch_mouse_event(
+                            "mouseMoved",
+                            x=wander_x,
+                            y=wander_y,
+                            button=cdp.input_.MouseButton("none"),
+                            buttons=0,
+                        ))
+                        await asyncio.sleep(random.uniform(0.03, 0.09))
 
                 if humanize:
                     start_x = max(0, x + random.uniform(-80, 80))
@@ -268,6 +291,9 @@ class DOMHandler:
                     ))
                     await asyncio.sleep(0.08)
 
+                if humanize:
+                    # Hover on the target briefly before pressing.
+                    await asyncio.sleep(random.uniform(0.15, 0.45))
                 await tab.send(cdp.input_.dispatch_mouse_event(
                     "mousePressed",
                     x=x,
@@ -276,7 +302,11 @@ class DOMHandler:
                     buttons=1,
                     click_count=1,
                 ))
-                await asyncio.sleep(random.uniform(0.05, 0.12) if humanize else 0.06)
+                if humanize:
+                    # Human press-hold before release.
+                    await asyncio.sleep(random.uniform(0.06, 0.16))
+                else:
+                    await asyncio.sleep(0.06)
                 await tab.send(cdp.input_.dispatch_mouse_event(
                     "mouseReleased",
                     x=x,
