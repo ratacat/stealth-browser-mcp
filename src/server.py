@@ -342,6 +342,49 @@ async def go_back(instance_id: str) -> bool:
     return True
 
 @section_tool("browser-management")
+async def add_init_script(
+    instance_id: str,
+    script: str,
+    replace_identifier: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Register a script to evaluate on every new document before any page scripts
+    run (CDP Page.addScriptToEvaluateOnNewDocument). Use this for stealth
+    patches that must exist before the target site's own scripts execute.
+
+    Args:
+        instance_id (str): Browser instance ID.
+        script (str): JavaScript source to evaluate at document start.
+        replace_identifier (Optional[str]): If given, first remove a previously
+            registered script with this identifier (CDP
+            Page.removeScriptToEvaluateOnNewDocument) before adding.
+
+    Returns:
+        Dict[str, Any]: {"success": bool, "identifier": str|None, "error": str|None}
+    """
+    tab = await browser_manager.get_tab(instance_id)
+    if not tab:
+        raise Exception(f"Instance not found: {instance_id}")
+    try:
+        if replace_identifier:
+            await tab.send(
+                uc.cdp.page.remove_script_to_evaluate_on_new_document(
+                    replace_identifier
+                )
+            )
+        result = await tab.send(
+            uc.cdp.page.add_script_to_evaluate_on_new_document(script)
+        )
+        identifier = None
+        if isinstance(result, (list, tuple)) and result:
+            identifier = result[0]
+        elif isinstance(result, str):
+            identifier = result
+        return {"success": True, "identifier": identifier, "error": None}
+    except Exception as e:
+        return {"success": False, "identifier": None, "error": str(e)}
+
+@section_tool("browser-management")
 async def go_forward(instance_id: str) -> bool:
     """
     Navigate forward in history.
@@ -424,7 +467,10 @@ async def click_element(
     instance_id: str,
     selector: str,
     text_match: Optional[str] = None,
-    timeout: int = 10000
+    timeout: int = 10000,
+    offset_x: Optional[float] = None,
+    offset_y: Optional[float] = None,
+    humanize: bool = False
 ) -> bool:
     """
     Click an element.
@@ -434,6 +480,9 @@ async def click_element(
         selector (str): CSS selector or XPath.
         text_match (Optional[str]): Click element with matching text.
         timeout (int): Timeout in milliseconds.
+        offset_x (Optional[float]): Horizontal click offset from the element's left edge.
+        offset_y (Optional[float]): Vertical click offset from the element's top edge.
+        humanize (bool): Use paced pointer movement before clicking.
 
     Returns:
         bool: True if clicked successfully.
@@ -443,7 +492,15 @@ async def click_element(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await dom_handler.click_element(tab, selector, text_match, timeout)
+    return await dom_handler.click_element(
+        tab,
+        selector,
+        text_match,
+        timeout,
+        offset_x=offset_x,
+        offset_y=offset_y,
+        humanize=humanize,
+    )
 
 @section_tool("element-interaction")
 async def type_text(
@@ -810,6 +867,24 @@ async def list_network_requests(
     ]
     
     return response_handler.handle_response(formatted_requests, "network_requests")
+
+
+@section_tool("network-debugging")
+async def list_websocket_frames(
+    instance_id: str
+) -> List[Dict[str, Any]]:
+    """
+    List captured WebSocket frames (sent/received) for a browser instance.
+
+    Essential for X Chat (E2E), which sends/receives messages over WebSocket
+    rather than HTTP GraphQL mutations.
+
+    Args:
+        instance_id (str): Browser instance ID.
+    Returns:
+        List[Dict[str, Any]]: Frames with direction, url, data, opcode, timestamp.
+    """
+    return await network_interceptor.get_websocket_frames(instance_id)
 
 
 @section_tool("network-debugging")

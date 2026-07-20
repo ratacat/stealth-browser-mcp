@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import math
+import random
 import time
 from typing import List, Optional, Dict, Any
 
@@ -157,7 +159,10 @@ class DOMHandler:
         tab: Tab,
         selector: str,
         text_match: Optional[str] = None,
-        timeout: int = 10000
+        timeout: int = 10000,
+        offset_x: Optional[float] = None,
+        offset_y: Optional[float] = None,
+        humanize: bool = False
     ) -> bool:
         """
         Click an element with smart retry logic.
@@ -167,11 +172,21 @@ class DOMHandler:
             selector (str): CSS selector for the element.
             text_match (Optional[str]): Match element by text content.
             timeout (int): Timeout in milliseconds.
+            offset_x (Optional[float]): Horizontal click offset from the element's left edge.
+            offset_y (Optional[float]): Vertical click offset from the element's top edge.
+            humanize (bool): Move the pointer along a paced curved path before clicking.
 
         Returns:
             bool: True if click succeeded, False otherwise.
         """
         try:
+            offset_x_value = None if offset_x is None else float(offset_x)
+            offset_y_value = None if offset_y is None else float(offset_y)
+            if offset_x_value is not None and not math.isfinite(offset_x_value):
+                raise ValueError("offset_x must be finite")
+            if offset_y_value is not None and not math.isfinite(offset_y_value):
+                raise ValueError("offset_y must be finite")
+
             element = None
 
             if text_match:
@@ -190,33 +205,69 @@ class DOMHandler:
 
                 click_point = await element.apply(
                     """(elem) => {
+                        const offsetX = %s;
+                        const offsetY = %s;
                         const rect = elem.getBoundingClientRect();
                         if (!rect || rect.width < 1 || rect.height < 1) {
                             return null;
                         }
-                        const x = rect.left + rect.width / 2;
-                        const y = rect.top + rect.height / 2;
+                        const clampOffset = (offset, size) =>
+                            offset === null
+                                ? size / 2
+                                : Math.min(Math.max(offset, 1), Math.max(size - 1, 1));
+                        const x = rect.left + clampOffset(offsetX, rect.width);
+                        const y = rect.top + clampOffset(offsetY, rect.height);
                         const top = document.elementFromPoint(x, y);
                         const hit = top === elem || elem.contains(top);
                         return { x, y, width: rect.width, height: rect.height, hit };
-                    }"""
+                    }""" % (json.dumps(offset_x_value), json.dumps(offset_y_value))
                 )
                 if not click_point:
                     raise Exception("Element click point not available")
                 if isinstance(click_point, str):
                     click_point = json.loads(click_point)
                 if not click_point.get("hit", False):
-                    raise Exception("Element center is covered")
+                    raise Exception("Element click point is covered")
                 x = float(click_point["x"])
                 y = float(click_point["y"])
-                await tab.send(cdp.input_.dispatch_mouse_event(
-                    "mouseMoved",
-                    x=x,
-                    y=y,
-                    button=cdp.input_.MouseButton("none"),
-                    buttons=0,
-                ))
-                await asyncio.sleep(0.08)
+
+                if humanize:
+                    start_x = max(0, x + random.uniform(-80, 80))
+                    start_y = max(0, y + random.uniform(-45, 45))
+                    control_x = (start_x + x) / 2 + random.uniform(-25, 25)
+                    control_y = (start_y + y) / 2 + random.uniform(-18, 18)
+                    steps = random.randint(7, 12)
+                    for step in range(1, steps + 1):
+                        progress = step / steps
+                        inverse = 1 - progress
+                        move_x = (
+                            inverse * inverse * start_x
+                            + 2 * inverse * progress * control_x
+                            + progress * progress * x
+                        )
+                        move_y = (
+                            inverse * inverse * start_y
+                            + 2 * inverse * progress * control_y
+                            + progress * progress * y
+                        )
+                        await tab.send(cdp.input_.dispatch_mouse_event(
+                            "mouseMoved",
+                            x=move_x,
+                            y=move_y,
+                            button=cdp.input_.MouseButton("none"),
+                            buttons=0,
+                        ))
+                        await asyncio.sleep(random.uniform(0.008, 0.02))
+                else:
+                    await tab.send(cdp.input_.dispatch_mouse_event(
+                        "mouseMoved",
+                        x=x,
+                        y=y,
+                        button=cdp.input_.MouseButton("none"),
+                        buttons=0,
+                    ))
+                    await asyncio.sleep(0.08)
+
                 await tab.send(cdp.input_.dispatch_mouse_event(
                     "mousePressed",
                     x=x,
@@ -225,7 +276,7 @@ class DOMHandler:
                     buttons=1,
                     click_count=1,
                 ))
-                await asyncio.sleep(0.06)
+                await asyncio.sleep(random.uniform(0.05, 0.12) if humanize else 0.06)
                 await tab.send(cdp.input_.dispatch_mouse_event(
                     "mouseReleased",
                     x=x,
@@ -235,6 +286,8 @@ class DOMHandler:
                     click_count=1,
                 ))
             except Exception:
+                if offset_x_value is not None or offset_y_value is not None:
+                    raise
                 await element.click()
 
             return True
