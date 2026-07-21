@@ -155,6 +155,85 @@ class DOMHandler:
             return []
 
     @staticmethod
+    async def click_coordinates(
+        tab: Tab,
+        x: float,
+        y: float,
+        humanize: bool = False,
+        warmup: bool = False
+    ) -> bool:
+        """Click a viewport coordinate with trusted CDP pointer events."""
+        try:
+            from nodriver import cdp
+
+            x_value = float(x)
+            y_value = float(y)
+            if not math.isfinite(x_value) or not math.isfinite(y_value):
+                raise ValueError("coordinates must be finite")
+            if x_value < 0 or y_value < 0:
+                raise ValueError("coordinates must be non-negative")
+
+            viewport = await tab.evaluate(
+                "({ width: window.innerWidth, height: window.innerHeight })",
+                return_by_value=True,
+            )
+            viewport = DOMHandler._plain_from_deep_serialized(viewport)
+            viewport_width = float((viewport or {}).get("width") or 1280)
+            viewport_height = float((viewport or {}).get("height") or 720)
+            if x_value >= viewport_width or y_value >= viewport_height:
+                raise ValueError("coordinates must be inside the viewport")
+
+            if warmup:
+                humanize = True
+                for _ in range(random.randint(3, 6)):
+                    await tab.send(cdp.input_.dispatch_mouse_event(
+                        "mouseMoved",
+                        x=random.uniform(0.15, 0.85) * viewport_width,
+                        y=random.uniform(0.15, 0.8) * viewport_height,
+                        button=cdp.input_.MouseButton("none"),
+                        buttons=0,
+                    ))
+                    await asyncio.sleep(random.uniform(0.03, 0.09))
+
+            if humanize:
+                start_x = min(max(x_value + random.uniform(-80, 80), 0), viewport_width - 1)
+                start_y = min(max(y_value + random.uniform(-45, 45), 0), viewport_height - 1)
+                control_x = (start_x + x_value) / 2 + random.uniform(-25, 25)
+                control_y = (start_y + y_value) / 2 + random.uniform(-18, 18)
+                steps = random.randint(7, 12)
+                for step in range(1, steps + 1):
+                    progress = step / steps
+                    inverse = 1 - progress
+                    await tab.send(cdp.input_.dispatch_mouse_event(
+                        "mouseMoved",
+                        x=(inverse * inverse * start_x + 2 * inverse * progress * control_x + progress * progress * x_value),
+                        y=(inverse * inverse * start_y + 2 * inverse * progress * control_y + progress * progress * y_value),
+                        button=cdp.input_.MouseButton("none"),
+                        buttons=0,
+                    ))
+                    await asyncio.sleep(random.uniform(0.008, 0.02))
+                await asyncio.sleep(random.uniform(0.15, 0.45))
+            else:
+                await tab.send(cdp.input_.dispatch_mouse_event(
+                    "mouseMoved", x=x_value, y=y_value,
+                    button=cdp.input_.MouseButton("none"), buttons=0,
+                ))
+                await asyncio.sleep(0.08)
+
+            await tab.send(cdp.input_.dispatch_mouse_event(
+                "mousePressed", x=x_value, y=y_value,
+                button=cdp.input_.MouseButton("left"), buttons=1, click_count=1,
+            ))
+            await asyncio.sleep(random.uniform(0.06, 0.16) if humanize else 0.06)
+            await tab.send(cdp.input_.dispatch_mouse_event(
+                "mouseReleased", x=x_value, y=y_value,
+                button=cdp.input_.MouseButton("left"), buttons=0, click_count=1,
+            ))
+            return True
+        except Exception as e:
+            raise Exception(f"Failed to click coordinates: {str(e)}")
+
+    @staticmethod
     async def click_element(
         tab: Tab,
         selector: str,

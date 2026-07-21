@@ -463,6 +463,22 @@ async def query_elements(
     return result if result else []
 
 @section_tool("element-interaction")
+async def click_coordinates(
+    instance_id: str,
+    x: float,
+    y: float,
+    humanize: bool = False,
+    warmup: bool = False
+) -> bool:
+    """Click a viewport coordinate with trusted CDP pointer events."""
+    tab = await browser_manager.get_tab(instance_id)
+    if not tab:
+        raise Exception(f"Instance not found: {instance_id}")
+    return await dom_handler.click_coordinates(
+        tab, x, y, humanize=humanize, warmup=warmup
+    )
+
+@section_tool("element-interaction")
 async def click_element(
     instance_id: str,
     selector: str,

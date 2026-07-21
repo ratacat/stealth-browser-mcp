@@ -23,14 +23,19 @@ class _FakeElement:
 
 
 class _FakeTab:
-    def __init__(self, element, *, fail_send=False):
+    def __init__(self, element=None, *, fail_send=False, viewport=None):
         self.element = element
         self.fail_send = fail_send
+        self.viewport = viewport or {"width": 1440, "height": 900}
         self.sent = []
 
     async def select(self, _selector, timeout):
         self.timeout = timeout
         return self.element
+
+    async def evaluate(self, _script, return_by_value=False):
+        self.return_by_value = return_by_value
+        return self.viewport
 
     async def send(self, command):
         if self.fail_send:
@@ -121,6 +126,36 @@ class DOMHandlerClickTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(element.native_fallback_clicked)
 
+    async def test_click_coordinates_dispatches_warmup_approach_and_click(self):
+        tab = _FakeTab()
+        events = []
+
+        def dispatch(event_type, **kwargs):
+            events.append((event_type, kwargs))
+            return {"event_type": event_type, **kwargs}
+
+        with (
+            patch("nodriver.cdp.input_.dispatch_mouse_event", side_effect=dispatch),
+            patch("dom_handler.asyncio.sleep", new=AsyncMock()),
+            patch("dom_handler.random.randint", side_effect=[3, 7]),
+            patch("dom_handler.random.uniform", return_value=0.2),
+        ):
+            clicked = await DOMHandler.click_coordinates(
+                tab, 293, 336, humanize=True, warmup=True
+            )
+
+        self.assertTrue(clicked)
+        self.assertTrue(tab.return_by_value)
+        self.assertEqual([event[0] for event in events].count("mousePressed"), 1)
+        self.assertEqual([event[0] for event in events].count("mouseReleased"), 1)
+        self.assertGreaterEqual([event[0] for event in events].count("mouseMoved"), 10)
+        pressed = next(event for event in events if event[0] == "mousePressed")
+        self.assertEqual((pressed[1]["x"], pressed[1]["y"]), (293.0, 336.0))
+
+    async def test_click_coordinates_rejects_points_outside_viewport(self):
+        with self.assertRaisesRegex(Exception, "inside the viewport"):
+            await DOMHandler.click_coordinates(_FakeTab(), 1600, 336)
+
 class ServerClickToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_click_tool_threads_offsets_and_humanize_to_dom_handler(self):
         tab = object()
@@ -182,6 +217,25 @@ class ServerClickToolTests(unittest.IsolatedAsyncioTestCase):
             warmup=True,
         )
 
+
+    async def test_coordinate_click_tool_threads_arguments_to_dom_handler(self):
+        tab = object()
+        get_tab = AsyncMock(return_value=tab)
+        click = AsyncMock(return_value=True)
+
+        with (
+            patch.object(server.browser_manager, "get_tab", get_tab),
+            patch.object(server.dom_handler, "click_coordinates", click),
+        ):
+            clicked = await server.click_coordinates.fn(
+                "browser-1", 293, 336, humanize=True, warmup=True
+            )
+
+        self.assertTrue(clicked)
+        get_tab.assert_awaited_once_with("browser-1")
+        click.assert_awaited_once_with(
+            tab, 293, 336, humanize=True, warmup=True
+        )
 
 
 if __name__ == "__main__":
