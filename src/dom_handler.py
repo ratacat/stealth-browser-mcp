@@ -4,13 +4,13 @@ import asyncio
 import json
 import math
 import random
+import re
 import time
 from typing import List, Optional, Dict, Any
 
 from nodriver import Tab, Element
 from models import ElementInfo, ElementAction
 from debug_logger import debug_logger
-
 
 
 class DOMHandler:
@@ -22,7 +22,7 @@ class DOMHandler:
         selector: str,
         text_filter: Optional[str] = None,
         visible_only: bool = True,
-        limit: Optional[Any] = None
+        limit: Optional[Any] = None,
     ) -> List[ElementInfo]:
         """
         Query elements with advanced filtering.
@@ -44,40 +44,56 @@ class DOMHandler:
                     processed_limit = limit
                 elif isinstance(limit, str) and limit.isdigit():
                     processed_limit = int(limit)
-                elif isinstance(limit, str) and limit.strip() == '':
+                elif isinstance(limit, str) and limit.strip() == "":
                     processed_limit = None
                 else:
-                    debug_logger.log_warning('DOMHandler', 'query_elements',
-                                            f'Invalid limit parameter: {limit} (type: {type(limit)})')
+                    debug_logger.log_warning(
+                        "DOMHandler",
+                        "query_elements",
+                        f"Invalid limit parameter: {limit} (type: {type(limit)})",
+                    )
                     processed_limit = None
             except (ValueError, TypeError) as e:
-                debug_logger.log_error('DOMHandler', 'query_elements', e,
-                                      {'limit_value': limit, 'limit_type': type(limit)})
+                debug_logger.log_error(
+                    "DOMHandler",
+                    "query_elements",
+                    e,
+                    {"limit_value": limit, "limit_type": type(limit)},
+                )
                 processed_limit = None
 
-        debug_logger.log_info('DOMHandler', 'query_elements',
-                             f'Starting query with selector: {selector}',
-                             {'text_filter': text_filter, 'visible_only': visible_only,
-                              'limit': limit, 'processed_limit': processed_limit})
+        debug_logger.log_info(
+            "DOMHandler",
+            "query_elements",
+            f"Starting query with selector: {selector}",
+            {
+                "text_filter": text_filter,
+                "visible_only": visible_only,
+                "limit": limit,
+                "processed_limit": processed_limit,
+            },
+        )
         try:
-            if selector.startswith('//'):
+            if selector.startswith("//"):
                 elements = await tab.xpath(selector)
-                debug_logger.log_info('DOMHandler', 'query_elements',
-                                     f'XPath query returned {len(elements)} elements')
+                debug_logger.log_info(
+                    "DOMHandler", "query_elements", f"XPath query returned {len(elements)} elements"
+                )
             else:
                 elements = await tab.select_all(selector)
-                debug_logger.log_info('DOMHandler', 'query_elements',
-                                     f'CSS query returned {len(elements)} elements')
+                debug_logger.log_info(
+                    "DOMHandler", "query_elements", f"CSS query returned {len(elements)} elements"
+                )
 
             results = []
             for idx, elem in enumerate(elements):
                 try:
-                    if hasattr(elem, 'update'):
+                    if hasattr(elem, "update"):
                         await elem.update()
 
-                    tag_name = elem.tag_name if hasattr(elem, 'tag_name') else 'unknown'
-                    text_content = elem.text_all if hasattr(elem, 'text_all') else ''
-                    attrs = elem.attrs if hasattr(elem, 'attrs') else {}
+                    tag_name = elem.tag_name if hasattr(elem, "tag_name") else "unknown"
+                    text_content = elem.text_all if hasattr(elem, "text_all") else ""
+                    attrs = elem.attrs if hasattr(elem, "attrs") else {}
 
                     if text_filter and text_filter.lower() not in text_content.lower():
                         continue
@@ -85,14 +101,12 @@ class DOMHandler:
                     is_visible = True
                     if visible_only:
                         try:
-                            is_visible = await elem.apply(
-                                """(elem) => {
+                            is_visible = await elem.apply("""(elem) => {
                                     var style = window.getComputedStyle(elem);
                                     return style.display !== 'none' && 
                                            style.visibility !== 'hidden' && 
                                            style.opacity !== '0';
-                                }"""
-                            )
+                                }""")
                             if not is_visible:
                                 continue
                         except:
@@ -103,10 +117,10 @@ class DOMHandler:
                         position = await elem.get_position()
                         if position:
                             bbox = {
-                                'x': position.x,
-                                'y': position.y,
-                                'width': position.width,
-                                'height': position.height
+                                "x": position.x,
+                                "y": position.y,
+                                "width": position.width,
+                                "height": position.height,
                             }
                     except Exception:
                         pass
@@ -115,7 +129,7 @@ class DOMHandler:
 
                     children_count = 0
                     try:
-                        if hasattr(elem, 'children'):
+                        if hasattr(elem, "children"):
                             children = elem.children
                             children_count = len(children) if children else 0
                     except Exception:
@@ -129,38 +143,42 @@ class DOMHandler:
                         is_visible=is_visible,
                         is_clickable=is_clickable,
                         bounding_box=bbox,
-                        children_count=children_count
+                        children_count=children_count,
                     )
 
                     results.append(element_info)
 
                     if processed_limit and len(results) >= processed_limit:
-                        debug_logger.log_info('DOMHandler', 'query_elements',
-                                             f'Reached limit of {processed_limit} results')
+                        debug_logger.log_info(
+                            "DOMHandler",
+                            "query_elements",
+                            f"Reached limit of {processed_limit} results",
+                        )
                         break
 
                 except Exception as elem_error:
-                    debug_logger.log_error('DOMHandler', 'query_elements',
-                                          elem_error,
-                                          {'element_index': idx, 'selector': selector})
+                    debug_logger.log_error(
+                        "DOMHandler",
+                        "query_elements",
+                        elem_error,
+                        {"element_index": idx, "selector": selector},
+                    )
                     continue
 
-            debug_logger.log_info('DOMHandler', 'query_elements',
-                                 f'Returning {len(results)} results')
+            debug_logger.log_info(
+                "DOMHandler", "query_elements", f"Returning {len(results)} results"
+            )
             return results
 
         except Exception as e:
-            debug_logger.log_error('DOMHandler', 'query_elements', e,
-                                  {'selector': selector, 'tab': str(tab)})
+            debug_logger.log_error(
+                "DOMHandler", "query_elements", e, {"selector": selector, "tab": str(tab)}
+            )
             return []
 
     @staticmethod
     async def click_coordinates(
-        tab: Tab,
-        x: float,
-        y: float,
-        humanize: bool = False,
-        warmup: bool = False
+        tab: Tab, x: float, y: float, humanize: bool = False, warmup: bool = False
     ) -> bool:
         """Click a viewport coordinate with trusted CDP pointer events."""
         try:
@@ -186,13 +204,15 @@ class DOMHandler:
             if warmup:
                 humanize = True
                 for _ in range(random.randint(3, 6)):
-                    await tab.send(cdp.input_.dispatch_mouse_event(
-                        "mouseMoved",
-                        x=random.uniform(0.15, 0.85) * viewport_width,
-                        y=random.uniform(0.15, 0.8) * viewport_height,
-                        button=cdp.input_.MouseButton("none"),
-                        buttons=0,
-                    ))
+                    await tab.send(
+                        cdp.input_.dispatch_mouse_event(
+                            "mouseMoved",
+                            x=random.uniform(0.15, 0.85) * viewport_width,
+                            y=random.uniform(0.15, 0.8) * viewport_height,
+                            button=cdp.input_.MouseButton("none"),
+                            buttons=0,
+                        )
+                    )
                     await asyncio.sleep(random.uniform(0.03, 0.09))
 
             if humanize:
@@ -204,31 +224,58 @@ class DOMHandler:
                 for step in range(1, steps + 1):
                     progress = step / steps
                     inverse = 1 - progress
-                    await tab.send(cdp.input_.dispatch_mouse_event(
-                        "mouseMoved",
-                        x=(inverse * inverse * start_x + 2 * inverse * progress * control_x + progress * progress * x_value),
-                        y=(inverse * inverse * start_y + 2 * inverse * progress * control_y + progress * progress * y_value),
-                        button=cdp.input_.MouseButton("none"),
-                        buttons=0,
-                    ))
+                    await tab.send(
+                        cdp.input_.dispatch_mouse_event(
+                            "mouseMoved",
+                            x=(
+                                inverse * inverse * start_x
+                                + 2 * inverse * progress * control_x
+                                + progress * progress * x_value
+                            ),
+                            y=(
+                                inverse * inverse * start_y
+                                + 2 * inverse * progress * control_y
+                                + progress * progress * y_value
+                            ),
+                            button=cdp.input_.MouseButton("none"),
+                            buttons=0,
+                        )
+                    )
                     await asyncio.sleep(random.uniform(0.008, 0.02))
                 await asyncio.sleep(random.uniform(0.15, 0.45))
             else:
-                await tab.send(cdp.input_.dispatch_mouse_event(
-                    "mouseMoved", x=x_value, y=y_value,
-                    button=cdp.input_.MouseButton("none"), buttons=0,
-                ))
+                await tab.send(
+                    cdp.input_.dispatch_mouse_event(
+                        "mouseMoved",
+                        x=x_value,
+                        y=y_value,
+                        button=cdp.input_.MouseButton("none"),
+                        buttons=0,
+                    )
+                )
                 await asyncio.sleep(0.08)
 
-            await tab.send(cdp.input_.dispatch_mouse_event(
-                "mousePressed", x=x_value, y=y_value,
-                button=cdp.input_.MouseButton("left"), buttons=1, click_count=1,
-            ))
+            await tab.send(
+                cdp.input_.dispatch_mouse_event(
+                    "mousePressed",
+                    x=x_value,
+                    y=y_value,
+                    button=cdp.input_.MouseButton("left"),
+                    buttons=1,
+                    click_count=1,
+                )
+            )
             await asyncio.sleep(random.uniform(0.06, 0.16) if humanize else 0.06)
-            await tab.send(cdp.input_.dispatch_mouse_event(
-                "mouseReleased", x=x_value, y=y_value,
-                button=cdp.input_.MouseButton("left"), buttons=0, click_count=1,
-            ))
+            await tab.send(
+                cdp.input_.dispatch_mouse_event(
+                    "mouseReleased",
+                    x=x_value,
+                    y=y_value,
+                    button=cdp.input_.MouseButton("left"),
+                    buttons=0,
+                    click_count=1,
+                )
+            )
             return True
         except Exception as e:
             raise Exception(f"Failed to click coordinates: {str(e)}")
@@ -242,7 +289,7 @@ class DOMHandler:
         offset_x: Optional[float] = None,
         offset_y: Optional[float] = None,
         humanize: bool = False,
-        warmup: bool = False
+        warmup: bool = False,
     ) -> bool:
         """
         Click an element with smart retry logic.
@@ -274,9 +321,40 @@ class DOMHandler:
             element = None
 
             if text_match:
-                element = await tab.find(text_match, best_match=True)
+                try:
+                    text_pattern = re.compile(text_match, re.IGNORECASE)
+                except re.error as error:
+                    raise ValueError(f"Invalid text_match regex: {error}")
+                try:
+                    candidates = await tab.select_all(selector, timeout=timeout / 1000) or []
+                except Exception:
+                    candidates = []
+                element = next(
+                    (
+                        candidate
+                        for candidate in candidates
+                        if text_pattern.search((candidate.text_all or "").strip())
+                    ),
+                    None,
+                )
+                if element is None:
+                    literal_match = re.fullmatch(
+                        r"\(\?:\^([a-z0-9 _-]+)\$\)(?:\|\(\?:\^([a-z0-9 _-]+)\$\))*",
+                        text_match,
+                        re.IGNORECASE,
+                    )
+                    if literal_match:
+                        for literal in re.findall(
+                            r"\(\?:\^([a-z0-9 _-]+)\$\)", text_match, re.IGNORECASE
+                        ):
+                            candidate = await tab.find(literal, best_match=True)
+                            if candidate and text_pattern.search(
+                                (candidate.text_all or "").strip()
+                            ):
+                                element = candidate
+                                break
             else:
-                element = await tab.select(selector, timeout=timeout/1000)
+                element = await tab.select(selector, timeout=timeout / 1000)
 
             if not element:
                 raise Exception(f"Element not found: {selector}")
@@ -287,8 +365,7 @@ class DOMHandler:
             try:
                 from nodriver import cdp
 
-                click_point = await element.apply(
-                    """(elem) => {
+                click_point = await element.apply("""(elem) => {
                         const offsetX = %s;
                         const offsetY = %s;
                         const rect = elem.getBoundingClientRect();
@@ -305,8 +382,7 @@ class DOMHandler:
                         const hit = top === elem || elem.contains(top);
                         return { x, y, width: rect.width, height: rect.height, hit,
                                  vw: window.innerWidth, vh: window.innerHeight };
-                    }""" % (json.dumps(offset_x_value), json.dumps(offset_y_value))
-                )
+                    }""" % (json.dumps(offset_x_value), json.dumps(offset_y_value)))
                 if not click_point:
                     raise Exception("Element click point not available")
                 if isinstance(click_point, str):
@@ -324,13 +400,15 @@ class DOMHandler:
                     for _ in range(wander_count):
                         wander_x = min(max(random.uniform(0.15, 0.85) * vw, 0), vw - 1)
                         wander_y = min(max(random.uniform(0.15, 0.8) * vh, 0), vh - 1)
-                        await tab.send(cdp.input_.dispatch_mouse_event(
-                            "mouseMoved",
-                            x=wander_x,
-                            y=wander_y,
-                            button=cdp.input_.MouseButton("none"),
-                            buttons=0,
-                        ))
+                        await tab.send(
+                            cdp.input_.dispatch_mouse_event(
+                                "mouseMoved",
+                                x=wander_x,
+                                y=wander_y,
+                                button=cdp.input_.MouseButton("none"),
+                                buttons=0,
+                            )
+                        )
                         await asyncio.sleep(random.uniform(0.03, 0.09))
 
                 if humanize:
@@ -352,48 +430,56 @@ class DOMHandler:
                             + 2 * inverse * progress * control_y
                             + progress * progress * y
                         )
-                        await tab.send(cdp.input_.dispatch_mouse_event(
-                            "mouseMoved",
-                            x=move_x,
-                            y=move_y,
-                            button=cdp.input_.MouseButton("none"),
-                            buttons=0,
-                        ))
+                        await tab.send(
+                            cdp.input_.dispatch_mouse_event(
+                                "mouseMoved",
+                                x=move_x,
+                                y=move_y,
+                                button=cdp.input_.MouseButton("none"),
+                                buttons=0,
+                            )
+                        )
                         await asyncio.sleep(random.uniform(0.008, 0.02))
                 else:
-                    await tab.send(cdp.input_.dispatch_mouse_event(
-                        "mouseMoved",
-                        x=x,
-                        y=y,
-                        button=cdp.input_.MouseButton("none"),
-                        buttons=0,
-                    ))
+                    await tab.send(
+                        cdp.input_.dispatch_mouse_event(
+                            "mouseMoved",
+                            x=x,
+                            y=y,
+                            button=cdp.input_.MouseButton("none"),
+                            buttons=0,
+                        )
+                    )
                     await asyncio.sleep(0.08)
 
                 if humanize:
                     # Hover on the target briefly before pressing.
                     await asyncio.sleep(random.uniform(0.15, 0.45))
-                await tab.send(cdp.input_.dispatch_mouse_event(
-                    "mousePressed",
-                    x=x,
-                    y=y,
-                    button=cdp.input_.MouseButton("left"),
-                    buttons=1,
-                    click_count=1,
-                ))
+                await tab.send(
+                    cdp.input_.dispatch_mouse_event(
+                        "mousePressed",
+                        x=x,
+                        y=y,
+                        button=cdp.input_.MouseButton("left"),
+                        buttons=1,
+                        click_count=1,
+                    )
+                )
                 if humanize:
                     # Human press-hold before release.
                     await asyncio.sleep(random.uniform(0.06, 0.16))
                 else:
                     await asyncio.sleep(0.06)
-                await tab.send(cdp.input_.dispatch_mouse_event(
-                    "mouseReleased",
-                    x=x,
-                    y=y,
-                    button=cdp.input_.MouseButton("left"),
-                    buttons=0,
-                    click_count=1,
-                ))
+                await tab.send(
+                    cdp.input_.dispatch_mouse_event(
+                        "mouseReleased",
+                        x=x,
+                        y=y,
+                        button=cdp.input_.MouseButton("left"),
+                        buttons=0,
+                        click_count=1,
+                    )
+                )
             except Exception:
                 if offset_x_value is not None or offset_y_value is not None:
                     raise
@@ -412,99 +498,127 @@ class DOMHandler:
         clear_first: bool = True,
         delay_ms: int = 50,
         parse_newlines: bool = False,
-        shift_enter: bool = False
+        shift_enter: bool = False,
     ) -> bool:
-        """
-        Type text with human-like delays and optional newline parsing.
-
-        Args:
-            tab (Tab): The browser tab object.
-            selector (str): CSS selector for the input element.
-            text (str): Text to type.
-            clear_first (bool): Clear input before typing.
-            delay_ms (int): Delay between keystrokes in milliseconds.
-            parse_newlines (bool): If True, parse \n as Enter key presses.
-            shift_enter (bool): If True, use Shift+Enter instead of Enter (for chat apps).
-
-        Returns:
-            bool: True if typing succeeded, False otherwise.
-        """
+        """Type text with native CDP key sequences and verify controlled-input readback."""
         from nodriver import cdp
+
+        async def read_value(element) -> Optional[str]:
+            value = await element.apply("""(elem) => {
+                if (elem && typeof elem.value === 'string') return elem.value;
+                if (elem && typeof elem.textContent === 'string') return elem.textContent;
+                return null;
+            }""")
+            return value if isinstance(value, str) else None
+
+        async def clear_value(element) -> None:
+            await element.focus()
+            await tab.send(
+                cdp.input_.dispatch_key_event(
+                    "rawKeyDown", modifiers=2, key="a", code="KeyA", windows_virtual_key_code=65
+                )
+            )
+            await tab.send(
+                cdp.input_.dispatch_key_event(
+                    "keyUp", modifiers=2, key="a", code="KeyA", windows_virtual_key_code=65
+                )
+            )
+            await tab.send(
+                cdp.input_.dispatch_key_event(
+                    "rawKeyDown", key="Backspace", code="Backspace", windows_virtual_key_code=8
+                )
+            )
+            await tab.send(
+                cdp.input_.dispatch_key_event(
+                    "keyUp", key="Backspace", code="Backspace", windows_virtual_key_code=8
+                )
+            )
+            await asyncio.sleep(0.1)
+
+        async def dispatch_character(char: str) -> None:
+            if char == "\n" and parse_newlines:
+                modifiers = 8 if shift_enter else 0
+                await tab.send(
+                    cdp.input_.dispatch_key_event(
+                        "rawKeyDown",
+                        modifiers=modifiers,
+                        key="Enter",
+                        code="Enter",
+                        windows_virtual_key_code=13,
+                    )
+                )
+                await tab.send(
+                    cdp.input_.dispatch_key_event(
+                        "char",
+                        modifiers=modifiers,
+                        text="\n",
+                        key="Enter",
+                        code="Enter",
+                        windows_virtual_key_code=13,
+                    )
+                )
+                await tab.send(
+                    cdp.input_.dispatch_key_event(
+                        "keyUp",
+                        modifiers=modifiers,
+                        key="Enter",
+                        code="Enter",
+                        windows_virtual_key_code=13,
+                    )
+                )
+                return
+
+            upper = char.upper()
+            code = f"Key{upper}" if len(char) == 1 and char.isalpha() else "Unidentified"
+            key_code = ord(upper) if len(char) == 1 and char.isalpha() else ord(char)
+            await tab.send(
+                cdp.input_.dispatch_key_event(
+                    "rawKeyDown", key=char, code=code, windows_virtual_key_code=key_code
+                )
+            )
+            await tab.send(
+                cdp.input_.dispatch_key_event(
+                    "char", text=char, key=char, code=code, windows_virtual_key_code=key_code
+                )
+            )
+            await tab.send(
+                cdp.input_.dispatch_key_event(
+                    "keyUp", key=char, code=code, windows_virtual_key_code=key_code
+                )
+            )
 
         try:
             element = await tab.select(selector)
             if not element:
                 raise Exception(f"Element not found: {selector}")
 
-            await element.focus()
-            await asyncio.sleep(0.1)
-
-            if clear_first:
-                try:
-                    await element.apply("(elem) => { elem.value = ''; }")
-                except:
-                    await element.send_keys('\ue009' + 'a')
-                    await element.send_keys('\ue017')
+            last_observed: Optional[str] = None
+            for attempt in range(2):
+                await element.focus()
                 await asyncio.sleep(0.1)
+                if clear_first or attempt > 0:
+                    await clear_value(element)
 
-            if parse_newlines:
-                from nodriver import cdp
-                lines = text.split('\n')
-                for i, line in enumerate(lines):
-                    for char in line:
-                        await tab.send(cdp.input_.dispatch_key_event("char", text=char))
-                        await asyncio.sleep(delay_ms / 1000)
-                    
-                    if i < len(lines) - 1:
-                        if shift_enter:
-                            await element.apply('''(elem) => {
-                                const start = elem.selectionStart;
-                                const end = elem.selectionEnd;
-                                const value = elem.value;
-                                elem.value = value.substring(0, start) + '\\n' + value.substring(end);
-                                elem.selectionStart = elem.selectionEnd = start + 1;
-                                
-                                elem.dispatchEvent(new KeyboardEvent('keydown', {
-                                    key: 'Enter',
-                                    code: 'Enter',
-                                    shiftKey: true,
-                                    bubbles: true
-                                }));
-                                elem.dispatchEvent(new Event('input', { bubbles: true }));
-                            }''')
-                        else:
-                            await element.apply('''(elem) => {
-                                const start = elem.selectionStart;
-                                const end = elem.selectionEnd;
-                                const value = elem.value;
-                                elem.value = value.substring(0, start) + '\\n' + value.substring(end);
-                                elem.selectionStart = elem.selectionEnd = start + 1;
-                                
-                                elem.dispatchEvent(new KeyboardEvent('keydown', {
-                                    key: 'Enter',
-                                    code: 'Enter',
-                                    bubbles: true
-                                }));
-                                elem.dispatchEvent(new Event('input', { bubbles: true }));
-                            }''')
-                        await asyncio.sleep(delay_ms / 1000)
-            else:
                 for char in text:
-                    await tab.send(cdp.input_.dispatch_key_event("char", text=char))
-                    await asyncio.sleep(delay_ms / 1000)
+                    await dispatch_character(char)
+                    await asyncio.sleep(max(0, delay_ms) / 1000)
 
-            return True
+                await asyncio.sleep(0.12)
+                last_observed = await read_value(element)
+                if last_observed == text:
+                    return True
 
+            observed_length = len(last_observed) if isinstance(last_observed, str) else -1
+            raise Exception(
+                f"typed value did not persist: observed_length={observed_length} "
+                f"expected_length={len(text)}"
+            )
         except Exception as e:
             raise Exception(f"Failed to type text: {str(e)}")
 
     @staticmethod
     async def press_key(
-        tab: Tab,
-        key: str,
-        selector: Optional[str] = None,
-        delay_ms: int = 50,
-        modifiers: int = 0
+        tab: Tab, key: str, selector: Optional[str] = None, delay_ms: int = 50, modifiers: int = 0
     ) -> bool:
         """
         Press a keyboard key using Chrome DevTools input events.
@@ -538,33 +652,32 @@ class DOMHandler:
                 await asyncio.sleep(0.08)
 
             key_name, code, virtual_key_code = key_map.get(key, (key, key, 0))
-            await tab.send(cdp.input_.dispatch_key_event(
-                "rawKeyDown",
-                modifiers=modifiers,
-                key=key_name,
-                code=code,
-                windows_virtual_key_code=virtual_key_code,
-            ))
+            await tab.send(
+                cdp.input_.dispatch_key_event(
+                    "rawKeyDown",
+                    modifiers=modifiers,
+                    key=key_name,
+                    code=code,
+                    windows_virtual_key_code=virtual_key_code,
+                )
+            )
             await asyncio.sleep(delay_ms / 1000)
-            await tab.send(cdp.input_.dispatch_key_event(
-                "keyUp",
-                modifiers=modifiers,
-                key=key_name,
-                code=code,
-                windows_virtual_key_code=virtual_key_code,
-            ))
+            await tab.send(
+                cdp.input_.dispatch_key_event(
+                    "keyUp",
+                    modifiers=modifiers,
+                    key=key_name,
+                    code=code,
+                    windows_virtual_key_code=virtual_key_code,
+                )
+            )
             return True
 
         except Exception as e:
             raise Exception(f"Failed to press key: {str(e)}")
 
     @staticmethod
-    async def paste_text(
-        tab: Tab,
-        selector: str,
-        text: str,
-        clear_first: bool = True
-    ) -> bool:
+    async def paste_text(tab: Tab, selector: str, text: str, clear_first: bool = True) -> bool:
         """
         Paste text instantly using nodriver's insert_text method.
         This is much faster than typing character by character.
@@ -579,7 +692,7 @@ class DOMHandler:
             bool: True if pasting succeeded, False otherwise.
         """
         from nodriver import cdp
-        
+
         try:
             element = await tab.select(selector)
             if not element:
@@ -592,32 +705,34 @@ class DOMHandler:
                 try:
                     await element.apply("(elem) => { elem.value = ''; }")
                 except:
-                    await tab.send(cdp.input_.dispatch_key_event(
-                        "rawKeyDown", 
-                        modifiers=2,  # Ctrl
-                        key="a",
-                        code="KeyA",
-                        windows_virtual_key_code=65
-                    ))
-                    await tab.send(cdp.input_.dispatch_key_event(
-                        "keyUp", 
-                        modifiers=2,  # Ctrl
-                        key="a",
-                        code="KeyA",
-                        windows_virtual_key_code=65
-                    ))
-                    await tab.send(cdp.input_.dispatch_key_event(
-                        "rawKeyDown",
-                        key="Delete",
-                        code="Delete",
-                        windows_virtual_key_code=46
-                    ))
-                    await tab.send(cdp.input_.dispatch_key_event(
-                        "keyUp",
-                        key="Delete", 
-                        code="Delete",
-                        windows_virtual_key_code=46
-                    ))
+                    await tab.send(
+                        cdp.input_.dispatch_key_event(
+                            "rawKeyDown",
+                            modifiers=2,  # Ctrl
+                            key="a",
+                            code="KeyA",
+                            windows_virtual_key_code=65,
+                        )
+                    )
+                    await tab.send(
+                        cdp.input_.dispatch_key_event(
+                            "keyUp",
+                            modifiers=2,  # Ctrl
+                            key="a",
+                            code="KeyA",
+                            windows_virtual_key_code=65,
+                        )
+                    )
+                    await tab.send(
+                        cdp.input_.dispatch_key_event(
+                            "rawKeyDown", key="Delete", code="Delete", windows_virtual_key_code=46
+                        )
+                    )
+                    await tab.send(
+                        cdp.input_.dispatch_key_event(
+                            "keyUp", key="Delete", code="Delete", windows_virtual_key_code=46
+                        )
+                    )
                 await asyncio.sleep(0.1)
 
             await tab.send(cdp.input_.insert_text(text))
@@ -633,7 +748,7 @@ class DOMHandler:
         selector: str,
         value: Optional[str] = None,
         text: Optional[str] = None,
-        index: Optional[int] = None
+        index: Optional[int] = None,
     ) -> bool:
         """
         Select option from dropdown using nodriver's native methods.
@@ -687,10 +802,7 @@ class DOMHandler:
             raise Exception(f"Failed to select option: {str(e)}")
 
     @staticmethod
-    async def get_element_state(
-        tab: Tab,
-        selector: str
-    ) -> Dict[str, Any]:
+    async def get_element_state(tab: Tab, selector: str) -> Dict[str, Any]:
         """
         Get complete state of an element.
 
@@ -706,26 +818,32 @@ class DOMHandler:
             if not element:
                 raise Exception(f"Element not found: {selector}")
 
-            if hasattr(element, 'update'):
+            if hasattr(element, "update"):
                 await element.update()
 
             state = {
-                'tag_name': element.tag_name if hasattr(element, 'tag_name') else 'unknown',
-                'text': element.text if hasattr(element, 'text') else '',
-                'text_all': element.text_all if hasattr(element, 'text_all') else '',
-                'attributes': element.attrs if hasattr(element, 'attrs') else {},
-                'is_visible': True,
-                'is_clickable': False,
-                'is_enabled': True,
-                'value': element.attrs.get('value') if hasattr(element, 'attrs') else None,
-                'href': element.attrs.get('href') if hasattr(element, 'attrs') else None,
-                'src': element.attrs.get('src') if hasattr(element, 'attrs') else None,
-                'class': element.attrs.get('class') if hasattr(element, 'attrs') else None,
-                'id': element.attrs.get('id') if hasattr(element, 'attrs') else None,
-                'position': await element.get_position() if hasattr(element, 'get_position') else None,
-                'computed_style': {},
-                'children_count': len(element.children) if hasattr(element, 'children') and element.children else 0,
-                'parent_tag': None
+                "tag_name": element.tag_name if hasattr(element, "tag_name") else "unknown",
+                "text": element.text if hasattr(element, "text") else "",
+                "text_all": element.text_all if hasattr(element, "text_all") else "",
+                "attributes": element.attrs if hasattr(element, "attrs") else {},
+                "is_visible": True,
+                "is_clickable": False,
+                "is_enabled": True,
+                "value": element.attrs.get("value") if hasattr(element, "attrs") else None,
+                "href": element.attrs.get("href") if hasattr(element, "attrs") else None,
+                "src": element.attrs.get("src") if hasattr(element, "attrs") else None,
+                "class": element.attrs.get("class") if hasattr(element, "attrs") else None,
+                "id": element.attrs.get("id") if hasattr(element, "attrs") else None,
+                "position": (
+                    await element.get_position() if hasattr(element, "get_position") else None
+                ),
+                "computed_style": {},
+                "children_count": (
+                    len(element.children)
+                    if hasattr(element, "children") and element.children
+                    else 0
+                ),
+                "parent_tag": None,
             }
 
             return state
@@ -739,7 +857,7 @@ class DOMHandler:
         selector: str,
         timeout: int = 30000,
         visible: bool = True,
-        text_content: Optional[str] = None
+        text_content: Optional[str] = None,
     ) -> bool:
         """
         Wait for element to appear and match conditions.
@@ -764,14 +882,12 @@ class DOMHandler:
                 if element:
                     if visible:
                         try:
-                            is_visible = await element.apply(
-                                """(elem) => {
+                            is_visible = await element.apply("""(elem) => {
                                     var style = window.getComputedStyle(elem);
                                     return style.display !== 'none' && 
                                            style.visibility !== 'hidden' && 
                                            style.opacity !== '0';
-                                }"""
-                            )
+                                }""")
                             if not is_visible:
                                 await asyncio.sleep(0.5)
                                 continue
@@ -811,9 +927,7 @@ class DOMHandler:
                 return DOMHandler._plain_from_deep_serialized(plain)
             deep = getattr(value, "deep_serialized_value", None)
             if deep is not None:
-                return DOMHandler._plain_from_deep_serialized(
-                    getattr(deep, "value", None)
-                )
+                return DOMHandler._plain_from_deep_serialized(getattr(deep, "value", None))
             return None
         if isinstance(value, dict):
             # A single deep-serialized node: {"type": <cdp-type>, "value": ...}
@@ -822,9 +936,19 @@ class DOMHandler:
                 isinstance(node_type, str)
                 and node_type
                 in {
-                    "string", "number", "boolean", "bigint", "object",
-                    "array", "null", "undefined", "regexp", "date",
-                    "map", "set", "error",
+                    "string",
+                    "number",
+                    "boolean",
+                    "bigint",
+                    "object",
+                    "array",
+                    "null",
+                    "undefined",
+                    "regexp",
+                    "date",
+                    "map",
+                    "set",
+                    "error",
                 }
                 and ("value" in value or node_type in ("null", "undefined"))
                 and len(value) <= 4
@@ -835,14 +959,10 @@ class DOMHandler:
                 if node_type == "object" and isinstance(inner, list):
                     return DOMHandler._entries_to_plain(inner)
                 if node_type == "array" and isinstance(inner, list):
-                    return [
-                        DOMHandler._plain_from_deep_serialized(item)
-                        for item in inner
-                    ]
+                    return [DOMHandler._plain_from_deep_serialized(item) for item in inner]
                 return DOMHandler._plain_from_deep_serialized(inner)
             return {
-                key: DOMHandler._plain_from_deep_serialized(item)
-                for key, item in value.items()
+                key: DOMHandler._plain_from_deep_serialized(item) for key, item in value.items()
             }
         if isinstance(value, list):
             # Entry-list shape for a deep-serialized object: [[key, node], ...]
@@ -872,11 +992,7 @@ class DOMHandler:
         return result
 
     @staticmethod
-    async def execute_script(
-        tab: Tab,
-        script: str,
-        args: Optional[List[Any]] = None
-    ) -> Any:
+    async def execute_script(tab: Tab, script: str, args: Optional[List[Any]] = None) -> Any:
         """
         Execute JavaScript in page context.
 
@@ -892,7 +1008,7 @@ class DOMHandler:
             if args:
                 serialized_args = ",".join(json.dumps(a) for a in args)
                 result = await tab.evaluate(
-                    f'(function() {{ {script} }})({serialized_args})',
+                    f"(function() {{ {script} }})({serialized_args})",
                     return_by_value=True,
                 )
             else:
@@ -904,10 +1020,7 @@ class DOMHandler:
             raise Exception(f"Failed to execute script: {str(e)}")
 
     @staticmethod
-    async def get_page_content(
-        tab: Tab,
-        include_frames: bool = False
-    ) -> Dict[str, str]:
+    async def get_page_content(tab: Tab, include_frames: bool = False) -> Dict[str, str]:
         """
         Get page HTML and text content.
 
@@ -923,30 +1036,38 @@ class DOMHandler:
             text = await tab.evaluate("document.body.innerText")
 
             content = {
-                'html': html,
-                'text': text,
-                'url': await tab.evaluate("window.location.href"),
-                'title': await tab.evaluate("document.title")
+                "html": html,
+                "text": text,
+                "url": await tab.evaluate("window.location.href"),
+                "title": await tab.evaluate("document.title"),
             }
 
             if include_frames:
                 frames = []
-                iframe_elements = await tab.select_all('iframe')
+                iframe_elements = await tab.select_all("iframe")
 
                 for i, iframe in enumerate(iframe_elements):
                     try:
-                        src = iframe.attrs.get('src') if hasattr(iframe, 'attrs') else None
+                        src = iframe.attrs.get("src") if hasattr(iframe, "attrs") else None
                         if src:
-                            frames.append({
-                                'index': i,
-                                'src': src,
-                                'id': iframe.attrs.get('id') if hasattr(iframe, 'attrs') else None,
-                                'name': iframe.attrs.get('name') if hasattr(iframe, 'attrs') else None
-                            })
+                            frames.append(
+                                {
+                                    "index": i,
+                                    "src": src,
+                                    "id": (
+                                        iframe.attrs.get("id") if hasattr(iframe, "attrs") else None
+                                    ),
+                                    "name": (
+                                        iframe.attrs.get("name")
+                                        if hasattr(iframe, "attrs")
+                                        else None
+                                    ),
+                                }
+                            )
                     except Exception:
                         continue
 
-                content['frames'] = frames
+                content["frames"] = frames
 
             return content
 
@@ -955,10 +1076,7 @@ class DOMHandler:
 
     @staticmethod
     async def scroll_page(
-        tab: Tab,
-        direction: str = "down",
-        amount: int = 500,
-        smooth: bool = True
+        tab: Tab, direction: str = "down", amount: int = 500, smooth: bool = True
     ) -> bool:
         """
         Scroll the page in specified direction.
