@@ -732,130 +732,85 @@ class BrowserManager:
             return [data['instance'] for data in self._instances.values()]
 
     async def close_instance(self, instance_id: str) -> bool:
-        """
-        Close and remove a browser instance.
+        """Close and remove a browser instance without holding the registry lock."""
+        async with self._lock:
+            data = self._instances.pop(instance_id, None)
+            if data is None:
+                return False
+            self._spawn_diagnostics.pop(instance_id, None)
 
-        Args:
-            instance_id (str): The ID of the browser instance to close.
-
-        Returns:
-            bool: True if closed successfully, False otherwise.
-        """
-        import asyncio
-        
-        async def _do_close():
-            async with self._lock:
-                if instance_id not in self._instances:
-                    return False
-
-                data = self._instances[instance_id]
-                browser = data['browser']
-                instance = data['instance']
-                tab = data.get('tab')
-
-                try:
-                    await self._teardown_proxy_auth(instance_id)
-                except Exception:
-                    pass
-
-                try:
-                    if hasattr(browser, 'tabs') and browser.tabs:
-                        for tab in browser.tabs[:]:
-                            try:
-                                await tab.close()
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-
-                try:
-                    import nodriver.cdp.browser as cdp_browser
-                    if hasattr(browser, 'connection') and browser.connection:
-                        await asyncio.wait_for(browser.connection.send(cdp_browser.close()), timeout=2.0)
-                        debug_logger.log_info("browser_manager", "close_connection", "requested browser close over connection")
-                except (asyncio.TimeoutError, Exception) as e:
-                    debug_logger.log_info("browser_manager", "close_connection", f"browser close request failed or timed out: {e}")
-
-                try:
-                    if hasattr(browser, 'connection') and browser.connection:
-                        await asyncio.wait_for(browser.connection.disconnect(), timeout=2.0)
-                        debug_logger.log_info("browser_manager", "close_connection", "closed connection with direct await and timeout")
-                except (asyncio.TimeoutError, Exception) as e:
-                    debug_logger.log_info("browser_manager", "close_connection", f"connection disconnect failed or timed out: {e}")
-
-                try:
-                    process_cleanup.kill_browser_process(instance_id)
-                except Exception as e:
-                    debug_logger.log_warning("browser_manager", "close_instance", 
-                                           f"Process cleanup failed for {instance_id}: {e}")
-
-                try:
-                    await browser.stop()
-                except Exception:
-                    pass
-
-                if hasattr(browser, '_process') and browser._process and browser._process.returncode is None:
-                    import os
-
-                    for attempt in range(3):
-                        try:
-                            browser._process.terminate()
-                            debug_logger.log_info("browser_manager", "terminate_process", f"terminated browser with pid {browser._process.pid} successfully on attempt {attempt + 1}")
-                            break
-                        except Exception:
-                            try:
-                                browser._process.kill()
-                                debug_logger.log_info("browser_manager", "kill_process", f"killed browser with pid {browser._process.pid} successfully on attempt {attempt + 1}")
-                                break
-                            except Exception:
-                                try:
-                                    if hasattr(browser, '_process_pid') and browser._process_pid:
-                                        os.kill(browser._process_pid, 15)
-                                        debug_logger.log_info("browser_manager", "kill_process", f"killed browser with pid {browser._process_pid} using signal 15 successfully on attempt {attempt + 1}")
-                                        break
-                                except (PermissionError, ProcessLookupError) as e:
-                                    debug_logger.log_info("browser_manager", "kill_process", f"browser already stopped or no permission to kill: {e}")
-                                    break
-                                except Exception as e:
-                                    if attempt == 2:
-                                        debug_logger.log_error("browser_manager", "kill_process", e)
-
-                try:
-                    if hasattr(browser, '_process'):
-                        browser._process = None
-                    if hasattr(browser, '_process_pid'):
-                        browser._process_pid = None
-
-                    instance.state = BrowserState.CLOSED
-                except Exception:
-                    pass
-
-                del self._instances[instance_id]
-                self._spawn_diagnostics.pop(instance_id, None)
-
-                persistent_storage.remove_instance(instance_id)
-
-                return True
-        
+        browser = data['browser']
+        instance = data['instance']
         try:
-            return await asyncio.wait_for(_do_close(), timeout=5.0)
+            await asyncio.wait_for(self._close_browser_resources(instance_id, browser), timeout=5.0)
         except asyncio.TimeoutError:
-            debug_logger.log_info("browser_manager", "close_instance", f"Close timeout for {instance_id}, forcing cleanup")
+            debug_logger.log_info(
+                "browser_manager",
+                "close_instance",
+                f"Close timeout for {instance_id}, forcing process cleanup",
+            )
+            process_cleanup.kill_browser_process(instance_id)
+        except Exception as error:
+            debug_logger.log_error("browser_manager", "close_instance", error)
+            process_cleanup.kill_browser_process(instance_id)
+        finally:
+            instance.state = BrowserState.CLOSED
+            persistent_storage.remove_instance(instance_id)
+        return True
+
+    async def _close_browser_resources(self, instance_id: str, browser: Any) -> None:
+        try:
+            await self._teardown_proxy_auth(instance_id)
+        except Exception:
+            pass
+
+        try:
+            for tab in list(getattr(browser, 'tabs', []) or []):
+                try:
+                    await asyncio.wait_for(tab.close(), timeout=1.0)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            import nodriver.cdp.browser as cdp_browser
+            connection = getattr(browser, 'connection', None)
+            if connection:
+                await asyncio.wait_for(connection.send(cdp_browser.close()), timeout=1.0)
+        except Exception:
+            pass
+
+        try:
+            connection = getattr(browser, 'connection', None)
+            if connection:
+                await asyncio.wait_for(connection.disconnect(), timeout=1.0)
+        except Exception:
+            pass
+
+        process_cleanup.kill_browser_process(instance_id)
+
+        try:
+            await asyncio.wait_for(browser.stop(), timeout=1.0)
+        except Exception:
+            pass
+
+        browser_process = getattr(browser, '_process', None)
+        if browser_process and browser_process.returncode is None:
             try:
-                async with self._lock:
-                    if instance_id in self._instances:
-                        data = self._instances[instance_id]
-                        data['instance'].state = BrowserState.CLOSED
-                        del self._instances[instance_id]
-                        self._spawn_diagnostics.pop(instance_id, None)
-                        self._proxy_auth_handlers.pop(instance_id, None)
-                        persistent_storage.remove_instance(instance_id)
+                browser_process.terminate()
+                await asyncio.wait_for(browser_process.wait(), timeout=1.0)
             except Exception:
-                pass
-            return True
-        except Exception as e:
-            debug_logger.log_error("browser_manager", "close_instance", e)
-            return False
+                try:
+                    browser_process.kill()
+                    await asyncio.wait_for(browser_process.wait(), timeout=1.0)
+                except Exception:
+                    pass
+
+        if hasattr(browser, '_process'):
+            browser._process = None
+        if hasattr(browser, '_process_pid'):
+            browser._process_pid = None
 
     async def get_spawn_diagnostics(self, instance_id: str) -> Optional[Dict[str, Any]]:
         """Get spawn diagnostics for an instance."""

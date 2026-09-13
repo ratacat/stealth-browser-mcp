@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog and adheres to Semantic Versioning where practical.
 
+## [Unreleased]
+### Fixed
+- Isolated browser PID registries by manager process, preventing concurrent servers from terminating live browsers while preserving dead-owner recovery.
+- Honor screenshot format and full-page options when saving to a file.
+- Wait for the requested navigation lifecycle event and enforce the navigation timeout.
+
+Run `venv/bin/python scripts/browser_e2e.py` to check concurrent browser isolation, PNG/JPEG screenshots, full-page height, load waiting, and timeout handling with real Chrome processes.
+
 ## [0.2.5] - 2026-02-10
 ### Fixed
 - **MCP JSON-RPC Protocol Corruption** - All debug `print()` calls redirected from stdout to stderr, fixing tool hangs after `spawn_browser` and `navigate` (#8)
@@ -136,5 +144,4 @@ The format is based on Keep a Changelog and adheres to Semantic Versioning where
 - Initial public README overhaul
 - Community health files (CoC, Contributing, Security, Roadmap, Changelog)
 - Issue and PR templates
-
 

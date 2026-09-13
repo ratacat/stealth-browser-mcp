@@ -16,9 +16,13 @@ class ProcessCleanup:
     """Manages browser process tracking and cleanup."""
     
     def __init__(self):
-        self.pid_file = Path(os.path.expanduser("~/.stealth_browser_pids.json"))
+        self.registry_dir = Path(os.path.expanduser("~/.stealth_browser_pids"))
+        self.owner_pid = os.getpid()
+        self.owner_create_time = psutil.Process(self.owner_pid).create_time()
+        self.pid_file = self.registry_dir / f"{self.owner_pid}.json"
         self.tracked_pids: Set[int] = set()
         self.browser_processes: Dict[str, int] = {}
+        self.browser_create_times: Dict[str, float] = {}
         self._setup_cleanup_handlers()
         self._recover_orphaned_processes()
     
@@ -41,42 +45,102 @@ class ProcessCleanup:
         self._cleanup_all_tracked()
         sys.exit(0)
     
-    def _load_tracked_pids(self) -> Dict[str, int]:
-        """Load tracked PIDs from disk."""
+    @staticmethod
+    def _load_record(path: Path) -> dict | None:
         try:
-            if self.pid_file.exists():
-                with open(self.pid_file, 'r') as f:
-                    data = json.load(f)
-                    return data.get('browser_processes', {})
-        except Exception as e:
-            debug_logger.log_warning("process_cleanup", "load_pids", f"Failed to load PID file: {e}")
-        return {}
-    
+            with open(path, "r") as file:
+                record = json.load(file)
+            return record if isinstance(record, dict) else None
+        except Exception as error:
+            debug_logger.log_warning(
+                "process_cleanup",
+                "load_pids",
+                f"Failed to load PID file {path}: {error}",
+            )
+            return None
+
+    @staticmethod
+    def _owner_is_alive(record: dict) -> bool:
+        owner_pid = record.get("owner_pid")
+        owner_create_time = record.get("owner_create_time")
+        if not isinstance(owner_pid, int) or not isinstance(
+            owner_create_time, (int, float)
+        ):
+            return True
+        try:
+            return abs(psutil.Process(owner_pid).create_time() - owner_create_time) < 0.01
+        except psutil.NoSuchProcess:
+            return False
+        except Exception:
+            return True
+
+    @staticmethod
+    def _browser_matches_record(pid: object, create_time: object) -> bool:
+        if not isinstance(pid, int) or not isinstance(create_time, (int, float)):
+            return False
+        try:
+            return abs(psutil.Process(pid).create_time() - create_time) < 0.01
+        except psutil.NoSuchProcess:
+            return True
+        except Exception:
+            return False
+
     def _save_tracked_pids(self):
-        """Save tracked PIDs to disk."""
+        """Persist only this manager process's browsers."""
         try:
+            if not self.browser_processes:
+                self._clear_pid_file()
+                return
+            self.registry_dir.mkdir(parents=True, exist_ok=True)
             data = {
-                'browser_processes': self.browser_processes,
-                'timestamp': time.time()
+                "owner_pid": self.owner_pid,
+                "owner_create_time": self.owner_create_time,
+                "browser_processes": self.browser_processes,
+                "browser_create_times": self.browser_create_times,
+                "timestamp": time.time(),
             }
-            with open(self.pid_file, 'w') as f:
-                json.dump(data, f)
-        except Exception as e:
-            debug_logger.log_warning("process_cleanup", "save_pids", f"Failed to save PID file: {e}")
-    
+            temporary_file = self.pid_file.with_suffix(".tmp")
+            with open(temporary_file, "w") as file:
+                json.dump(data, file)
+            os.replace(temporary_file, self.pid_file)
+        except Exception as error:
+            debug_logger.log_warning(
+                "process_cleanup", "save_pids", f"Failed to save PID file: {error}"
+            )
+
     def _recover_orphaned_processes(self):
-        """Kill any orphaned browser processes from previous runs."""
-        saved_processes = self._load_tracked_pids()
-        killed_count = 0
-        
-        for instance_id, pid in saved_processes.items():
-            if self._kill_process_by_pid(pid, instance_id):
-                killed_count += 1
-        
-        if killed_count > 0:
-            debug_logger.log_info("process_cleanup", "recovery", f"Killed {killed_count} orphaned browser processes")
-        
-        self._clear_pid_file()
+        """Kill browsers only after their owning manager process has died."""
+        if not self.registry_dir.exists():
+            return
+
+        for record_path in self.registry_dir.glob("*.json"):
+            record = self._load_record(record_path)
+            if not record or self._owner_is_alive(record):
+                continue
+            saved_processes = record.get("browser_processes")
+            create_times = record.get("browser_create_times")
+            if not isinstance(saved_processes, dict) or not isinstance(create_times, dict):
+                continue
+
+            killed_count = 0
+            for instance_id, pid in saved_processes.items():
+                if self._browser_matches_record(pid, create_times.get(instance_id)):
+                    if self._kill_process_by_pid(pid, instance_id):
+                        killed_count += 1
+            if killed_count > 0:
+                debug_logger.log_info(
+                    "process_cleanup",
+                    "recovery",
+                    f"Killed {killed_count} orphaned browser processes",
+                )
+            try:
+                record_path.unlink()
+            except OSError as error:
+                debug_logger.log_warning(
+                    "process_cleanup",
+                    "clear_pids",
+                    f"Failed to clear PID file {record_path}: {error}",
+                )
     
     def track_browser_process(self, instance_id: str, browser_process) -> bool:
         """Track a browser process for cleanup.
@@ -92,6 +156,10 @@ class ProcessCleanup:
             if hasattr(browser_process, 'pid') and browser_process.pid:
                 pid = browser_process.pid
                 self.browser_processes[instance_id] = pid
+                try:
+                    self.browser_create_times[instance_id] = psutil.Process(pid).create_time()
+                except Exception:
+                    self.browser_create_times.pop(instance_id, None)
                 self.tracked_pids.add(pid)
                 self._save_tracked_pids()
                 
@@ -122,6 +190,7 @@ class ProcessCleanup:
                 pid = self.browser_processes[instance_id]
                 self.tracked_pids.discard(pid)
                 del self.browser_processes[instance_id]
+                self.browser_create_times.pop(instance_id, None)
                 self._save_tracked_pids()
                 
                 debug_logger.log_info("process_cleanup", "untrack_process", 
@@ -235,6 +304,7 @@ class ProcessCleanup:
         """Clean up all tracked browser processes."""
         if not self.browser_processes:
             debug_logger.log_info("process_cleanup", "cleanup_all", "No browser processes to clean up")
+            self._clear_pid_file()
             return
         
         debug_logger.log_info("process_cleanup", "cleanup_all", 
@@ -250,6 +320,7 @@ class ProcessCleanup:
         
         self.browser_processes.clear()
         self.tracked_pids.clear()
+        self.browser_create_times.clear()
         self._clear_pid_file()
     
     def _clear_pid_file(self):

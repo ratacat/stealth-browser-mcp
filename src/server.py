@@ -283,36 +283,42 @@ async def navigate(
     timeout: int = 30000,
     referrer: Optional[str] = None
 ) -> Dict[str, Any]:
-    """
-    Navigate to a URL.
-
-    Args:
-        instance_id (str): Browser instance ID.
-        url (str): URL to navigate to.
-        wait_until (str): Wait condition - 'load', 'domcontentloaded', or 'networkidle'.
-        timeout (int): Navigation timeout in milliseconds.
-        referrer (Optional[str]): Referrer URL.
-
-    Returns:
-        Dict[str, Any]: Navigation result with final URL and title.
-    """
     if isinstance(timeout, str):
         timeout = int(timeout)
+    lifecycle = {
+        "load": "load",
+        "domcontentloaded": "DOMContentLoaded",
+        "networkidle": "networkIdle",
+    }
+    if wait_until not in lifecycle:
+        raise ValueError("wait_until must be load, domcontentloaded, or networkidle")
+    if timeout <= 0:
+        raise ValueError("timeout must be positive")
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    try:
-        if referrer:
-            await tab.send(uc.cdp.network.set_extra_http_headers(
-                headers={"Referer": referrer}
-            ))
-        await tab.get(url)
-        if wait_until == "domcontentloaded":
-            await tab.wait(uc.cdp.page.DomContentEventFired)
-        elif wait_until == "networkidle":
-            await asyncio.sleep(2)
-        else:
-            await tab.wait(uc.cdp.page.LoadEventFired)
+
+    async def perform_navigation():
+        reached = asyncio.Event()
+        events = set()
+
+        def on_lifecycle(event):
+            if event.name == lifecycle[wait_until]:
+                events.add((event.frame_id, event.loader_id))
+                reached.set()
+
+        tab.add_handler(uc.cdp.page.LifecycleEvent, on_lifecycle)
+        try:
+            await tab.send(uc.cdp.page.enable())
+            await tab.send(uc.cdp.page.set_lifecycle_events_enabled(True))
+            frame_id, loader_id, error = await tab.send(uc.cdp.page.navigate(url, referrer=referrer))
+            if error:
+                raise RuntimeError(error)
+            while loader_id and (frame_id, loader_id) not in events:
+                reached.clear()
+                await reached.wait()
+        finally:
+            tab.remove_handler(uc.cdp.page.LifecycleEvent, on_lifecycle)
         final_url = await tab.evaluate("window.location.href")
         title = await tab.evaluate("document.title")
         await browser_manager.update_instance_state(instance_id, final_url, title)
@@ -321,8 +327,7 @@ async def navigate(
             "title": title,
             "success": True
         }
-    except Exception as e:
-        raise
+    return await asyncio.wait_for(perform_navigation(), timeout=timeout / 1000)
 
 @section_tool("browser-management")
 async def go_back(instance_id: str) -> bool:
@@ -806,14 +811,27 @@ async def take_screenshot(
     if file_path:
         save_path = Path(file_path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        await tab.save_screenshot(save_path)
-        return f"Screenshot saved. AI agents should use the Read tool to view this image: {str(save_path.absolute())}"
+        await tab.save_screenshot(
+            save_path,
+            format=format.lower(),
+            full_page=full_page,
+        )
+        return {
+            "file_path": str(save_path.absolute()),
+            "format": format.lower(),
+            "full_page": full_page,
+            "ok": True,
+        }
     
     with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
         tmp_path = Path(tmp_file.name)
     
     try:
-        await tab.save_screenshot(tmp_path)
+        await tab.save_screenshot(
+            tmp_path,
+            format=format.lower(),
+            full_page=full_page,
+        )
         
         with Image.open(tmp_path) as img:
             if img.mode in ('RGBA', 'LA', 'P') and format.lower() == 'jpeg':
