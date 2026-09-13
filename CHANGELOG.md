@@ -9,6 +9,7 @@ The format is based on Keep a Changelog and adheres to Semantic Versioning where
 - Isolated browser PID registries by manager process, preventing concurrent servers from terminating live browsers while preserving dead-owner recovery.
 - Honor screenshot format and full-page options when saving to a file.
 - Wait for the requested navigation lifecycle event and enforce the navigation timeout.
+- Declare the requests dependency used by element cloning so a clean installation can import the server.
 
 Run `venv/bin/python scripts/browser_e2e.py` to check concurrent browser isolation, PNG/JPEG screenshots, full-page height, load waiting, and timeout handling with real Chrome processes.
 
@@ -144,4 +145,3 @@ Run `venv/bin/python scripts/browser_e2e.py` to check concurrent browser isolati
 - Initial public README overhaul
 - Community health files (CoC, Contributing, Security, Roadmap, Changelog)
 - Issue and PR templates
-
